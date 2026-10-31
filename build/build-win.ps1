@@ -52,10 +52,11 @@ function Invoke-Step([string]$name, [string[]]$argv) {
     if ($LASTEXITCODE -ne 0) { throw "$name failed (exit $LASTEXITCODE)" }
 }
 
-Invoke-Step '[1/3] compile guids.cpp'         ($flags + @('-c', "$src\guids.cpp", '-o', "$out\guids.o"))
-Invoke-Step '[2/3] compile xavc_diag_mft.cpp' ($flags + @('-c', "$src\xavc_diag_mft.cpp", '-o', "$out\mft.o"))
-Invoke-Step '[3/3] link xavc_decoder.dll'     (@('-shared', '-o', "$out\xavc_decoder.dll",
-    "$out\guids.o", "$out\mft.o", "$src\xavc.def") + $searchDirs + @(
+Invoke-Step '[1/4] compile guids.cpp'         ($flags + @('-c', "$src\guids.cpp", '-o', "$out\guids.o"))
+Invoke-Step '[2/4] compile xavc_diag_mft.cpp' ($flags + @('-c', "$src\xavc_diag_mft.cpp", '-o', "$out\mft.o"))
+Invoke-Step '[3/4] compile xavc_bsh.cpp'      ($flags + @('-c', "$src\xavc_bsh.cpp", '-o', "$out\bsh.o"))
+Invoke-Step '[4/4] link xavc_decoder.dll'     (@('-shared', '-o', "$out\xavc_decoder.dll",
+    "$out\guids.o", "$out\mft.o", "$out\bsh.o", "$src\xavc.def") + $searchDirs + @(
     '-static-libgcc', '-static-libstdc++',
     '-lmfplat', '-lmfuuid', '-lole32', '-loleaut32', '-luuid'))
 

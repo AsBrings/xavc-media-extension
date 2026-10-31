@@ -35,6 +35,8 @@ static const GUID kFmtRGB32 = FOURCC_GUID(0x00000016);   // D3DFMT_X8R8G8B8
 static const GUID kCatVideoDecoder =
     { 0xd6c02d4b, 0x6833, 0x45b4, { 0x97, 0x1a, 0x05, 0xa4, 0xb0, 0x4b, 0xab, 0x91 } };
 static const GUID kClsidXavc =
+    { 0x0b1e6d2a, 0x7c3f, 0x4a58, { 0x9e, 0x21, 0x6f, 0x4d, 0x8c, 0x0a, 0x3b, 0x71 } };
+static const GUID kClsidXavcOld =
     { 0x7f9a3c21, 0x5e44, 0x4b0a, { 0x9c, 0x1d, 0x2a, 0x6b, 0x8e, 0x3d, 0x4f, 0x10 } };
 static const CLSID kClsidAppActivationMgr =
     { 0x45ba127d, 0x10a8, 0x46ea, { 0x8a, 0xb7, 0x56, 0xea, 0x90, 0x78, 0x94, 0x3c } };
@@ -124,8 +126,13 @@ static void DumpType(const char* label, IMFMediaType* t) {
 }
 
 // ---------------------------------------------------------------- enum
-static int CmdEnum() {
+static int CmdEnum(const wchar_t* fourcc) {
     MFT_REGISTER_TYPE_INFO in = { MFMediaType_Video, kFmtH264 };
+    if (fourcc && wcslen(fourcc) == 4) {
+        in.guidSubtype.Data1 = (DWORD)(fourcc[0] | (fourcc[1] << 8) | (fourcc[2] << 16) | (fourcc[3] << 24));
+        char f[5]; IsFourcc(in.guidSubtype, f);
+        printf("enumerating video decoders for '%s'\n", f);
+    }
     struct { const char* name; UINT32 flags; } sets[] = {
         { "SYNC|ASYNC|HW|SORTANDFILTER (typical desktop)", 0x1 | 0x2 | 0x4 | 0x40 },
         { "ALL (unsorted)", 0x3f },
@@ -149,7 +156,8 @@ static int CmdEnum() {
             acts[i]->GetUINT32(MFT_CODEC_MERIT_Attribute, &merit);
             acts[i]->GetUINT32(MF_TRANSFORM_FLAGS_Attribute, &tflags);
             printf("   %u. %-45s %s merit=%u flags=0x%X%s\n", i, U8(fname), GuidStr(clsid), merit, tflags,
-                   IsEqualGUID(clsid, kClsidXavc) ? "   <== XAVC" : "");
+                   IsEqualGUID(clsid, kClsidXavc) ? "   <== XAVC" :
+                   IsEqualGUID(clsid, kClsidXavcOld) ? "   <== XAVC (old CLSID)" : "");
             CoTaskMemFree(fname);
             acts[i]->Release();
         }
@@ -273,6 +281,73 @@ static int CmdRead(const wchar_t* path, bool rgb, bool d3d) {
     return frames > 0 ? 0 : 3;
 }
 
+// ---------------------------------------------------------------- resolve
+// Create the media source through IMFSourceResolver directly and print the video
+// stream subtypes it exposes (our byte stream handler retags 4:2:2 H.264 as 'XAVC').
+static void PrintSourceStreams(IMFMediaSource* src) {
+    IMFPresentationDescriptor* pd = NULL;
+    if (FAILED(src->CreatePresentationDescriptor(&pd))) return;
+    DWORD n = 0;
+    pd->GetStreamDescriptorCount(&n);
+    for (DWORD i = 0; i < n; i++) {
+        BOOL sel = FALSE;
+        IMFStreamDescriptor* sd = NULL;
+        if (FAILED(pd->GetStreamDescriptorByIndex(i, &sel, &sd))) continue;
+        IMFMediaTypeHandler* mth = NULL;
+        IMFMediaType* cur = NULL;
+        if (SUCCEEDED(sd->GetMediaTypeHandler(&mth)) && SUCCEEDED(mth->GetCurrentMediaType(&cur))) {
+            GUID major = GUID_NULL, sub = GUID_NULL;
+            cur->GetGUID(MF_MT_MAJOR_TYPE, &major);
+            cur->GetGUID(MF_MT_SUBTYPE, &sub);
+            char f[5] = "?";
+            if (!IsFourcc(sub, f)) snprintf(f, sizeof(f), "%s", "guid");
+            printf("   stream %lu: %s subtype '%s' %s\n", (unsigned long)i,
+                   IsEqualGUID(major, MFMediaType_Video) ? "video" : "other", f, GuidStr(sub));
+            // Would the source accept its own (possibly retagged) type back?
+            IMFMediaType* closest = NULL;
+            HRESULT hs = mth->IsMediaTypeSupported(cur, &closest);
+            printf("      IsMediaTypeSupported(current) hr=0x%08lX\n", (unsigned long)hs);
+            if (closest) closest->Release();
+            hs = mth->SetCurrentMediaType(cur);
+            printf("      SetCurrentMediaType(current) hr=0x%08lX\n", (unsigned long)hs);
+        }
+        if (cur) cur->Release();
+        if (mth) mth->Release();
+        sd->Release();
+    }
+    pd->Release();
+}
+
+static int CmdResolve(const wchar_t* path) {
+    IMFSourceResolver* r = NULL;
+    HRESULT hr = MFCreateSourceResolver(&r);
+    if (FAILED(hr)) { printf("MFCreateSourceResolver hr=0x%08lX\n", (unsigned long)hr); return 1; }
+    MF_OBJECT_TYPE type = MF_OBJECT_INVALID;
+    IUnknown* obj = NULL;
+    hr = r->CreateObjectFromURL(path, MF_RESOLUTION_MEDIASOURCE | MF_RESOLUTION_READ, NULL, &type, &obj);
+    printf("CreateObjectFromURL hr=0x%08lX type=%d\n", (unsigned long)hr, (int)type);
+    if (obj) {
+        IMFMediaSource* src = NULL;
+        if (SUCCEEDED(obj->QueryInterface(IID_IMFMediaSource, (void**)&src))) { PrintSourceStreams(src); src->Shutdown(); src->Release(); }
+        obj->Release();
+        obj = NULL;
+    }
+    IMFByteStream* bs = NULL;
+    hr = MFCreateFile(MF_ACCESSMODE_READ, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_FILEFLAGS_NONE, path, &bs);
+    if (SUCCEEDED(hr)) {
+        hr = r->CreateObjectFromByteStream(bs, path, MF_RESOLUTION_MEDIASOURCE | MF_RESOLUTION_READ, NULL, &type, &obj);
+        printf("CreateObjectFromByteStream hr=0x%08lX type=%d\n", (unsigned long)hr, (int)type);
+        if (obj) {
+            IMFMediaSource* src = NULL;
+            if (SUCCEEDED(obj->QueryInterface(IID_IMFMediaSource, (void**)&src))) { PrintSourceStreams(src); src->Shutdown(); src->Release(); }
+            obj->Release();
+        }
+        bs->Release();
+    }
+    r->Release();
+    return 0;
+}
+
 // ---------------------------------------------------------------- thumb
 static void SaveBmp(const wchar_t* out, const BYTE* px, int w, int h) {
     BITMAPFILEHEADER fh = {};
@@ -345,18 +420,19 @@ static int CmdOpen(const wchar_t* aumid, const wchar_t* path) {
 int wmain(int argc, wchar_t** argv) {
     printf("mftest pid=%lu\n", (unsigned long)GetCurrentProcessId());
     if (argc < 2) {
-        printf("usage: mftest enum | read <file> [rgb|d3d] | thumb <file> [out.bmp] | open <aumid> <file>\n");
+        printf("usage: mftest enum [fourcc] | read <file> [rgb|d3d] | thumb <file> [out.bmp] | open <aumid> <file>\n");
         return 64;
     }
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     MFStartup(MF_VERSION, MFSTARTUP_FULL);
     int rc = 64;
     const wchar_t* cmd = argv[1];
-    if (!wcscmp(cmd, L"enum")) rc = CmdEnum();
+    if (!wcscmp(cmd, L"enum")) rc = CmdEnum(argc >= 3 ? argv[2] : NULL);
     else if (!wcscmp(cmd, L"read") && argc >= 3) {
         const wchar_t* mode = argc >= 4 ? argv[3] : L"";
         rc = CmdRead(argv[2], !wcscmp(mode, L"rgb"), !wcscmp(mode, L"d3d"));
     }
+    else if (!wcscmp(cmd, L"resolve") && argc >= 3) rc = CmdResolve(argv[2]);
     else if (!wcscmp(cmd, L"thumb") && argc >= 3) rc = CmdThumb(argv[2], argc >= 4 ? argv[3] : NULL);
     else if (!wcscmp(cmd, L"open") && argc >= 4) rc = CmdOpen(argv[2], argv[3]);
     else printf("bad arguments\n");

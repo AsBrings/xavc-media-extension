@@ -27,7 +27,7 @@ void  operator delete(void* p) noexcept { free(p); }
 void  operator delete(void* p, size_t) noexcept { free(p); }
 
 static HMODULE g_hInst = NULL;
-static volatile LONG g_cObj = 0;   // live objects
+volatile LONG g_cObj = 0;          // live objects (also counted by xavc_bsh.cpp)
 static volatile LONG g_cLock = 0;  // class-factory locks
 
 static void FormatInfo(const GUID& sub, UINT32 w, UINT32 h, UINT32* stride, UINT32* size) {
@@ -69,10 +69,12 @@ public:
                      m_outStride(0), m_outSize(0), m_pending(NULL),
                      m_time(0), m_dur(0) {
         memset(&m_outSub, 0, sizeof(m_outSub));
+        m_inSub = XAVC_VideoFormat_XAVC;
         InterlockedIncrement(&g_cObj);
         XavcLog("CXavcDecoder created");
     }
     virtual ~CXavcDecoder() {
+        XavcLog("T %p destroyed", this);
         if (m_pending) m_pending->Release();
         InterlockedDecrement(&g_cObj);
     }
@@ -84,6 +86,9 @@ public:
             IsEqualIID(riid, IID_IXavcMarker)) {
             *ppv = static_cast<IMFTransform*>(this); AddRef(); return S_OK;
         }
+        wchar_t g[64]; StringFromGUID2(riid, g, 64);
+        char g8[64]; WideCharToMultiByte(CP_ACP, 0, g, -1, g8, sizeof(g8), NULL, NULL);
+        XavcLog("T %p QueryInterface %s -> E_NOINTERFACE", this, g8);
         *ppv = NULL; return E_NOINTERFACE;
     }
     STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&m_cRef); }
@@ -99,38 +104,42 @@ public:
     STDMETHODIMP GetStreamCount(DWORD* in, DWORD* out) {
         if (!in||!out) return E_POINTER; *in=1; *out=1; return S_OK;
     }
-    STDMETHODIMP GetStreamIDs(DWORD, DWORD*, DWORD, DWORD*) { return E_NOTIMPL; }
+    STDMETHODIMP GetStreamIDs(DWORD, DWORD*, DWORD, DWORD*) { XavcLog("T %p GetStreamIDs", this); return E_NOTIMPL; }
 
     STDMETHODIMP GetInputStreamInfo(DWORD id, MFT_INPUT_STREAM_INFO* p) {
+        XavcLog("T %p GetInputStreamInfo", this);
         if (id) return MF_E_INVALIDSTREAMNUMBER; if (!p) return E_POINTER;
         memset(p, 0, sizeof(*p));
         p->dwFlags = MFT_INPUT_STREAM_WHOLE_SAMPLES | MFT_INPUT_STREAM_SINGLE_SAMPLE_PER_BUFFER;
         return S_OK;
     }
     STDMETHODIMP GetOutputStreamInfo(DWORD id, MFT_OUTPUT_STREAM_INFO* p) {
+        XavcLog("T %p GetOutputStreamInfo (outSize=%u)", this, m_outSize);
         if (id) return MF_E_INVALIDSTREAMNUMBER; if (!p) return E_POINTER;
         memset(p, 0, sizeof(*p));
         p->dwFlags = MFT_OUTPUT_STREAM_WHOLE_SAMPLES | MFT_OUTPUT_STREAM_FIXED_SAMPLE_SIZE;
         p->cbSize = m_outSize;  // client allocates this
         return S_OK;
     }
-    STDMETHODIMP GetAttributes(IMFAttributes** pp) { (void)pp; return E_NOTIMPL; }
-    STDMETHODIMP GetInputStreamAttributes(DWORD, IMFAttributes**) { return E_NOTIMPL; }
-    STDMETHODIMP GetOutputStreamAttributes(DWORD, IMFAttributes**) { return E_NOTIMPL; }
+    STDMETHODIMP GetAttributes(IMFAttributes** pp) { (void)pp; XavcLog("T %p GetAttributes -> E_NOTIMPL", this); return E_NOTIMPL; }
+    STDMETHODIMP GetInputStreamAttributes(DWORD, IMFAttributes**) { XavcLog("T %p GetInputStreamAttributes", this); return E_NOTIMPL; }
+    STDMETHODIMP GetOutputStreamAttributes(DWORD, IMFAttributes**) { XavcLog("T %p GetOutputStreamAttributes", this); return E_NOTIMPL; }
     STDMETHODIMP DeleteInputStream(DWORD) { return E_NOTIMPL; }
     STDMETHODIMP AddInputStreams(DWORD, DWORD*) { return E_NOTIMPL; }
 
     // Available types
     STDMETHODIMP GetInputAvailableType(DWORD id, DWORD idx, IMFMediaType** pp) {
+        XavcLog("T %p GetInputAvailableType idx=%lu", this, (unsigned long)idx);
         if (id) return MF_E_INVALIDSTREAMNUMBER; if (!pp) return E_POINTER;
         if (idx > 0) return MF_E_NO_MORE_TYPES;
         IMFMediaType* t = NULL; HRESULT hr = MFCreateMediaType(&t);
         if (FAILED(hr)) return hr;
         t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        t->SetGUID(MF_MT_SUBTYPE, XAVC_VideoFormat_H264);
+        t->SetGUID(MF_MT_SUBTYPE, XAVC_VideoFormat_XAVC);
         *pp = t; return S_OK;
     }
     STDMETHODIMP GetOutputAvailableType(DWORD id, DWORD idx, IMFMediaType** pp) {
+        XavcLog("T %p GetOutputAvailableType idx=%lu inSet=%d", this, (unsigned long)idx, (int)m_inSet);
         if (id) return MF_E_INVALIDSTREAMNUMBER; if (!pp) return E_POINTER;
         if (!m_inSet) return MF_E_TRANSFORM_TYPE_NOT_SET;
         GUID sub;
@@ -142,12 +151,17 @@ public:
     }
 
     STDMETHODIMP SetInputType(DWORD id, IMFMediaType* t, DWORD flags) {
+        { GUID mj = GUID_NULL, sb = GUID_NULL; if (t) { t->GetGUID(MF_MT_MAJOR_TYPE, &mj); t->GetGUID(MF_MT_SUBTYPE, &sb); }
+          XavcLog("T %p SetInputType id=%lu t=%p major=%08lx sub=%08lx flags=%lu", this, (unsigned long)id, (void*)t, (unsigned long)mj.Data1, (unsigned long)sb.Data1, (unsigned long)flags); }
         if (id) return MF_E_INVALIDSTREAMNUMBER;
         if (!t) { if (!(flags & MFT_SET_TYPE_TEST_ONLY)) { m_inSet=FALSE; } return S_OK; }
         GUID maj, sub;
         if (FAILED(t->GetGUID(MF_MT_MAJOR_TYPE, &maj)) || !IsEqualGUID(maj, MFMediaType_Video))
             return MF_E_INVALIDMEDIATYPE;
-        if (FAILED(t->GetGUID(MF_MT_SUBTYPE, &sub)) || !IsEqualGUID(sub, XAVC_VideoFormat_H264))
+        // 'XAVC' is what our byte stream handler tags undecodable-by-inbox H.264 with;
+        // plain H264 is still accepted (profile-checked below) for direct use.
+        if (FAILED(t->GetGUID(MF_MT_SUBTYPE, &sub)) ||
+            (!IsEqualGUID(sub, XAVC_VideoFormat_XAVC) && !IsEqualGUID(sub, XAVC_VideoFormat_H264)))
             return MF_E_INVALIDMEDIATYPE;
 
         // Confirm High 4:2:2 (etc.) from the codec private data. If we cannot
@@ -161,8 +175,8 @@ public:
         UINT32 mtProfile = 0;
         if (profile < 0 && SUCCEEDED(t->GetUINT32(MF_MT_MPEG2_PROFILE, &mtProfile)))
             profile = (int)mtProfile;   // the MPEG-4 source also states the profile here
-        XavcLog("SetInputType: H264, seqhdr=%s profile_idc=%d flags=%lu",
-                blobLen ? "yes" : "no", profile, (unsigned long)flags);
+        XavcLog("SetInputType: subtype %08lx, seqhdr=%s profile_idc=%d flags=%lu",
+                (unsigned long)sub.Data1, blobLen ? "yes" : "no", profile, (unsigned long)flags);
         if (!XavcIsHigh422Profile(profile)) {
             XavcLog("SetInputType: not High 4:2:2 -> reject (let in-box decode)");
             return MF_E_INVALIDMEDIATYPE;
@@ -173,12 +187,14 @@ public:
         MFGetAttributeRatio(t, MF_MT_FRAME_RATE, &fn, &fd);
         if (!w || !h) { XavcLog("SetInputType: missing frame size -> reject"); return MF_E_INVALIDMEDIATYPE; }
         if (flags & MFT_SET_TYPE_TEST_ONLY) return S_OK;
-        m_w = w; m_h = h; m_fpsN = fn; m_fpsD = fd; m_inSet = TRUE; m_outSet = FALSE;
+        m_w = w; m_h = h; m_fpsN = fn; m_fpsD = fd; m_inSet = TRUE; m_outSet = FALSE; m_inSub = sub;
         XavcLog("SetInputType ACCEPTED: %ux%u @ %u/%u (profile %d)", w, h, fn, fd, profile);
         return S_OK;
     }
 
     STDMETHODIMP SetOutputType(DWORD id, IMFMediaType* t, DWORD flags) {
+        { GUID sb = GUID_NULL; if (t) t->GetGUID(MF_MT_SUBTYPE, &sb);
+          XavcLog("T %p SetOutputType t=%p sub=%08lx flags=%lu inSet=%d", this, (void*)t, (unsigned long)sb.Data1, (unsigned long)flags, (int)m_inSet); }
         if (id) return MF_E_INVALIDSTREAMNUMBER;
         if (!m_inSet) return MF_E_TRANSFORM_TYPE_NOT_SET;
         if (!t) { if (!(flags & MFT_SET_TYPE_TEST_ONLY)) m_outSet=FALSE; return S_OK; }
@@ -207,7 +223,7 @@ public:
         if (!m_inSet) return MF_E_TRANSFORM_TYPE_NOT_SET;
         IMFMediaType* t=NULL; HRESULT hr=MFCreateMediaType(&t); if (FAILED(hr)) return hr;
         t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        t->SetGUID(MF_MT_SUBTYPE, XAVC_VideoFormat_H264);
+        t->SetGUID(MF_MT_SUBTYPE, m_inSub);
         MFSetAttributeSize(t, MF_MT_FRAME_SIZE, m_w, m_h);
         *pp=t; return S_OK;
     }
@@ -296,15 +312,26 @@ private:
     LONG m_cRef;
     BOOL m_haveInput, m_inSet, m_outSet;
     UINT32 m_w, m_h, m_fpsN, m_fpsD, m_outStride, m_outSize;
-    GUID m_outSub;
+    GUID m_outSub, m_inSub;
     IMFSample* m_pending;
     LONGLONG m_time, m_dur;
 };
 
 // ----------------------- class factory -----------------------
+static HRESULT CreateDecoder(REFIID riid, void** ppv) {
+    XavcLog("Factory::CreateInstance (decoder)");
+    CXavcDecoder* d = new CXavcDecoder();
+    if (!d) return E_OUTOFMEMORY;
+    HRESULT hr = d->QueryInterface(riid, ppv);
+    d->Release();
+    return hr;
+}
+
+typedef HRESULT (*CreateFn)(REFIID riid, void** ppv);
+
 class CFactory : public IClassFactory {
 public:
-    CFactory() : m_cRef(1) {}
+    explicit CFactory(CreateFn fn) : m_cRef(1), m_fn(fn) {}
     virtual ~CFactory() {}
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) {
         if (!ppv) return E_POINTER;
@@ -317,11 +344,7 @@ public:
     STDMETHODIMP_(ULONG) Release() { LONG c=InterlockedDecrement(&m_cRef); if(!c) delete this; return c; }
     STDMETHODIMP CreateInstance(IUnknown* outer, REFIID riid, void** ppv) {
         if (outer) return CLASS_E_NOAGGREGATION;
-        XavcLog("Factory::CreateInstance");
-        CXavcDecoder* d = new CXavcDecoder();
-        if (!d) return E_OUTOFMEMORY;
-        HRESULT hr = d->QueryInterface(riid, ppv);
-        d->Release(); return hr;
+        return m_fn(riid, ppv);
     }
     STDMETHODIMP LockServer(BOOL lock) {
         if (lock) InterlockedIncrement(&g_cLock); else InterlockedDecrement(&g_cLock);
@@ -329,6 +352,7 @@ public:
     }
 private:
     LONG m_cRef;
+    CreateFn m_fn;
 };
 
 // ----------------------- registration -----------------------
@@ -358,7 +382,9 @@ static void RemoveLegacyBraceKeys() {
 }
 
 static HRESULT RegisterMFT() {
-    MFT_REGISTER_TYPE_INFO in[1]  = { { MFMediaType_Video, XAVC_VideoFormat_H264 } };
+    // Only the private 'XAVC' subtype: we are never in the H.264 decoder list, so
+    // ordinary H.264 playback is not affected in any way.
+    MFT_REGISTER_TYPE_INFO in[1]  = { { MFMediaType_Video, XAVC_VideoFormat_XAVC } };
     MFT_REGISTER_TYPE_INFO out[3] = { { MFMediaType_Video, XAVC_VideoFormat_NV12 },
                                       { MFMediaType_Video, XAVC_VideoFormat_P010 },
                                       { MFMediaType_Video, XAVC_VideoFormat_Y210 } };
@@ -380,16 +406,18 @@ static void UnregisterMFT() {
     RemoveLegacyBraceKeys();
 }
 
-static HRESULT WriteClsidKeys() {
-    wchar_t guid[64]; StringFromGUID2(CLSID_XavcH264Decoder, guid, 64);
-    wchar_t keyInproc[160];
-    _snwprintf(keyInproc, 160, L"CLSID\\%ls\\InprocServer32", guid);
+static const wchar_t* kBshFriendly = L"XAVC Byte Stream Handler (diagnostic)";
+
+// HKCR\CLSID\{clsid} + InprocServer32 -> this DLL.
+static HRESULT WriteClsidKey(REFCLSID clsid, const wchar_t* friendly) {
+    wchar_t guid[64]; StringFromGUID2(clsid, guid, 64);
+    wchar_t keyClsid[96]; _snwprintf(keyClsid, 96, L"CLSID\\%ls", guid);
+    wchar_t keyInproc[160]; _snwprintf(keyInproc, 160, L"CLSID\\%ls\\InprocServer32", guid);
     wchar_t path[MAX_PATH]; GetModuleFileNameW(g_hInst, path, MAX_PATH);
 
     HKEY k;
-    wchar_t keyClsid[96]; _snwprintf(keyClsid, 96, L"CLSID\\%ls", guid);
     if (RegCreateKeyExW(HKEY_CLASSES_ROOT, keyClsid, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) == ERROR_SUCCESS) {
-        RegSetValueExW(k, NULL, 0, REG_SZ, (const BYTE*)kFriendly, (DWORD)((wcslen(kFriendly)+1)*2));
+        RegSetValueExW(k, NULL, 0, REG_SZ, (const BYTE*)friendly, (DWORD)((wcslen(friendly)+1)*2));
         RegCloseKey(k);
     }
     if (RegCreateKeyExW(HKEY_CLASSES_ROOT, keyInproc, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) != ERROR_SUCCESS)
@@ -399,6 +427,20 @@ static HRESULT WriteClsidKeys() {
     RegSetValueExW(k, L"ThreadingModel", 0, REG_SZ, (const BYTE*)both, (DWORD)((wcslen(both)+1)*2));
     RegCloseKey(k);
     return S_OK;
+}
+
+static void DeleteClsidKey(REFCLSID clsid) {
+    wchar_t guid[64]; StringFromGUID2(clsid, guid, 64);
+    wchar_t keyClsid[96]; _snwprintf(keyClsid, 96, L"CLSID\\%ls", guid);
+    wchar_t sub[160]; _snwprintf(sub, 160, L"%ls\\InprocServer32", keyClsid);
+    RegDeleteKeyW(HKEY_CLASSES_ROOT, sub);
+    RegDeleteKeyW(HKEY_CLASSES_ROOT, keyClsid);
+}
+
+static HRESULT WriteClsidKeys() {
+    HRESULT hr = WriteClsidKey(CLSID_XavcH264Decoder, kFriendly);
+    if (SUCCEEDED(hr)) hr = WriteClsidKey(CLSID_XavcByteStreamHandler, kBshFriendly);
+    return hr;
 }
 
 STDAPI DllRegisterServer() {
@@ -428,20 +470,20 @@ STDAPI DllUnregisterServer() {
     MFStartup(MF_VERSION, MFSTARTUP_LITE);
     UnregisterMFT();
     MFShutdown();
-    wchar_t guid[64]; StringFromGUID2(CLSID_XavcH264Decoder, guid, 64);
-    wchar_t keyClsid[96]; _snwprintf(keyClsid, 96, L"CLSID\\%ls", guid);
-    wchar_t sub[160];
-    _snwprintf(sub, 160, L"%ls\\InprocServer32", keyClsid);
-    RegDeleteKeyW(HKEY_CLASSES_ROOT, sub);
-    RegDeleteKeyW(HKEY_CLASSES_ROOT, keyClsid);
+    DeleteClsidKey(CLSID_XavcH264Decoder);
+    DeleteClsidKey(CLSID_XavcByteStreamHandler);
     return S_OK;
 }
 
 STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
-    if (!IsEqualCLSID(clsid, CLSID_XavcH264Decoder)) return CLASS_E_CLASSNOTAVAILABLE;
-    XavcLog("DllGetClassObject");
-    CFactory* f = new CFactory();
+    *ppv = NULL;
+    CreateFn fn = NULL;
+    if (IsEqualCLSID(clsid, CLSID_XavcH264Decoder)) fn = CreateDecoder;
+    else if (IsEqualCLSID(clsid, CLSID_XavcByteStreamHandler)) fn = XavcCreateByteStreamHandler;
+    else return CLASS_E_CLASSNOTAVAILABLE;
+    XavcLog("DllGetClassObject(%s)", fn == CreateDecoder ? "decoder" : "bytestream handler");
+    CFactory* f = new CFactory(fn);
     if (!f) return E_OUTOFMEMORY;
     HRESULT hr = f->QueryInterface(riid, ppv);
     f->Release(); return hr;

@@ -16,6 +16,26 @@
 // that already live in mfuuid.a.
 #include "xavc_guids.h"
 
+// IMFByteStreamHandler (mfidl.h in the Windows SDK; missing from mingw-w64).
+#ifndef __IMFByteStreamHandler_INTERFACE_DEFINED__
+#define __IMFByteStreamHandler_INTERFACE_DEFINED__
+struct IMFByteStreamHandler : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE BeginCreateObject(IMFByteStream* pByteStream, LPCWSTR pwszURL,
+        DWORD dwFlags, IPropertyStore* pProps, IUnknown** ppIUnknownCancelCookie,
+        IMFAsyncCallback* pCallback, IUnknown* punkState) = 0;
+    virtual HRESULT STDMETHODCALLTYPE EndCreateObject(IMFAsyncResult* pResult,
+        MF_OBJECT_TYPE* pObjectType, IUnknown** ppObject) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CancelObjectCreation(IUnknown* pIUnknownCancelCookie) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetMaxNumberOfBytesRequiredForResolution(QWORD* pqwBytes) = 0;
+};
+#endif
+
+// Live COM objects in this DLL (DllCanUnloadNow).
+extern volatile LONG g_cObj;
+
+// xavc_bsh.cpp
+HRESULT XavcCreateByteStreamHandler(REFIID riid, void** ppv);
+
 // ---- Logging (robust across normal + AppContainer hosts) ----
 // Primary sink: OutputDebugStringA (captured by DebugView, even from AppContainer).
 // Secondary: a file the installer makes world/AppContainer-writable.
@@ -72,4 +92,18 @@ static inline bool XavcIsHigh422Profile(int profile_idc) {
     // Profiles the in-box H.264 decoder does NOT handle:
     // 122 High 4:2:2, 244 High 4:4:4 Predictive, 44 CAVLC 4:4:4, 110 High 10
     return profile_idc == 122 || profile_idc == 244 || profile_idc == 44 || profile_idc == 110;
+}
+
+// H.264 profile_idc of a media type: from the sequence header if present, else from
+// MF_MT_MPEG2_PROFILE (the MPEG-4 source sets both). -1 if unknown.
+static inline int XavcProfileOfMediaType(IMFMediaType* mt) {
+    int profile = -1;
+    BYTE* blob = NULL; UINT32 len = 0;
+    if (SUCCEEDED(mt->GetAllocatedBlob(MF_MT_MPEG_SEQUENCE_HEADER, &blob, &len)) && blob) {
+        profile = XavcH264ProfileFromConfig(blob, len);
+        CoTaskMemFree(blob);
+    }
+    UINT32 p = 0;
+    if (profile < 0 && SUCCEEDED(mt->GetUINT32(MF_MT_MPEG2_PROFILE, &p))) profile = (int)p;
+    return profile;
 }
