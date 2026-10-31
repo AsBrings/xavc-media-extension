@@ -1,27 +1,44 @@
 # Install-XavcDecoder.ps1  (ASCII-only; run by double-click or from PowerShell)
 # Installs and registers the DIAGNOSTIC XAVC H.264 4:2:2 decoder MFT system-wide.
 # Self-elevates to Administrator. Safe to uninstall with Uninstall-XavcDecoder.ps1.
+#
+#   -DllPath <file>  DLL to install. Default: next to this script, else ..\build\out.
+#   -NoPause         Do not wait for Enter at the end (for scripted runs).
 
+param(
+    [string]$DllPath,
+    [switch]$NoPause
+)
 $ErrorActionPreference = 'Stop'
 
-# ---- self-elevate ----
+function Done([int]$code) {
+    if (-not $NoPause) { Read-Host "Enter to exit" | Out-Null }
+    exit $code
+}
+
+# ---- self-elevate (forwarding our parameters) ----
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $pr = New-Object Security.Principal.WindowsPrincipal($id)
 if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Elevating to Administrator..."
-    Start-Process powershell -Verb RunAs -ArgumentList @(
-        '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
-    exit
+    $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    if ($DllPath) { $argv += @('-DllPath', "`"$DllPath`"") }
+    if ($NoPause) { $argv += '-NoPause' }
+    $p = Start-Process powershell -Verb RunAs -ArgumentList $argv -Wait -PassThru
+    exit $p.ExitCode
 }
 
-$src = Join-Path $PSScriptRoot 'xavc_decoder.dll'
-if (-not (Test-Path $src)) { Write-Host "ERROR: xavc_decoder.dll not found next to this script."; Read-Host "Enter to exit"; exit 1 }
+if (-not $DllPath) {
+    $DllPath = Join-Path $PSScriptRoot 'xavc_decoder.dll'
+    if (-not (Test-Path $DllPath)) { $DllPath = Join-Path $PSScriptRoot '..\build\out\xavc_decoder.dll' }
+}
+if (-not (Test-Path $DllPath)) { Write-Host "ERROR: DLL not found: $DllPath"; Done 1 }
 
 $dest = Join-Path $env:ProgramFiles 'XavcDecoder'
 $log  = Join-Path $env:ProgramData 'XavcDecoder'
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 New-Item -ItemType Directory -Force -Path $log  | Out-Null
-Copy-Item $src (Join-Path $dest 'xavc_decoder.dll') -Force
+Copy-Item $DllPath (Join-Path $dest 'xavc_decoder.dll') -Force
 
 # Let the log folder be writable from inside the Media Player sandbox (AppContainer)
 # so the MFT can record whether it was loaded.
@@ -33,7 +50,7 @@ Remove-Item (Join-Path $log 'xavc.log') -ErrorAction SilentlyContinue
 $dll = Join-Path $dest 'xavc_decoder.dll'
 Write-Host "Registering $dll ..."
 $p = Start-Process regsvr32 -ArgumentList "/s `"$dll`"" -Wait -PassThru
-if ($p.ExitCode -ne 0) { Write-Host "regsvr32 FAILED (exit $($p.ExitCode))."; Read-Host "Enter to exit"; exit 1 }
+if ($p.ExitCode -ne 0) { Write-Host "regsvr32 FAILED (exit $($p.ExitCode))."; Done 1 }
 
 Write-Host ""
 Write-Host "Installed and registered OK."
@@ -46,4 +63,4 @@ Write-Host "  2. If you see a solid MAGENTA frame -> the player loaded our decod
 Write-Host "     If you still get 'unsupported' / black -> it does not use third-party decoders."
 Write-Host "  3. Either way, send me the contents of:  $log\xavc.log"
 Write-Host ""
-Read-Host "Enter to exit"
+Done 0

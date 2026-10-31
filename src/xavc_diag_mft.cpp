@@ -80,7 +80,8 @@ public:
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) {
         if (!ppv) return E_POINTER;
-        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IMFTransform)) {
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IMFTransform) ||
+            IsEqualIID(riid, IID_IXavcMarker)) {
             *ppv = static_cast<IMFTransform*>(this); AddRef(); return S_OK;
         }
         *ppv = NULL; return E_NOINTERFACE;
@@ -157,6 +158,9 @@ public:
             profile = XavcH264ProfileFromConfig(blob, blobLen);
             CoTaskMemFree(blob);
         }
+        UINT32 mtProfile = 0;
+        if (profile < 0 && SUCCEEDED(t->GetUINT32(MF_MT_MPEG2_PROFILE, &mtProfile)))
+            profile = (int)mtProfile;   // the MPEG-4 source also states the profile here
         XavcLog("SetInputType: H264, seqhdr=%s profile_idc=%d flags=%lu",
                 blobLen ? "yes" : "no", profile, (unsigned long)flags);
         if (!XavcIsHigh422Profile(profile)) {
@@ -183,10 +187,15 @@ public:
             return MF_E_INVALIDMEDIATYPE;
         if (FAILED(t->GetGUID(MF_MT_SUBTYPE,&sub))) return MF_E_INVALIDMEDIATYPE;
         if (!IsEqualGUID(sub, XAVC_VideoFormat_NV12) && !IsEqualGUID(sub, XAVC_VideoFormat_P010)
-            && !IsEqualGUID(sub, XAVC_VideoFormat_Y210))
+            && !IsEqualGUID(sub, XAVC_VideoFormat_Y210)) {
+            XavcLog("SetOutputType: reject subtype %08lx", (unsigned long)sub.Data1);
             return MF_E_INVALIDMEDIATYPE;
+        }
         UINT32 w=0,h=0; MFGetAttributeSize(t, MF_MT_FRAME_SIZE, &w,&h);
-        if (w != m_w || h != m_h) return MF_E_INVALIDMEDIATYPE;
+        if (w != m_w || h != m_h) {
+            XavcLog("SetOutputType: reject size %ux%u (want %ux%u)", w, h, m_w, m_h);
+            return MF_E_INVALIDMEDIATYPE;
+        }
         if (flags & MFT_SET_TYPE_TEST_ONLY) return S_OK;
         m_outSub = sub; FormatInfo(sub, m_w, m_h, &m_outStride, &m_outSize); m_outSet = TRUE;
         XavcLog("SetOutputType ACCEPTED: stride=%u size=%u", m_outStride, m_outSize);
@@ -218,7 +227,10 @@ public:
     STDMETHODIMP SetOutputBounds(LONGLONG, LONGLONG) { return S_OK; }
     STDMETHODIMP ProcessEvent(DWORD, IMFMediaEvent*) { return E_NOTIMPL; }
 
-    STDMETHODIMP ProcessMessage(MFT_MESSAGE_TYPE m, ULONG_PTR) {
+    STDMETHODIMP ProcessMessage(MFT_MESSAGE_TYPE m, ULONG_PTR param) {
+        XavcLog("ProcessMessage 0x%08x param=%p", (unsigned)m, (void*)param);
+        if (m == MFT_MESSAGE_SET_D3D_MANAGER && param)
+            return E_NOTIMPL;   // software MFT: decline the D3D manager, output system memory
         if (m == MFT_MESSAGE_COMMAND_FLUSH) {
             if (m_pending) { m_pending->Release(); m_pending = NULL; } m_haveInput = FALSE;
         }
@@ -229,6 +241,8 @@ public:
         if (id) return MF_E_INVALIDSTREAMNUMBER; if (!s) return E_POINTER;
         if (!m_inSet || !m_outSet) return MF_E_TRANSFORM_TYPE_NOT_SET;
         if (m_haveInput) return MF_E_NOTACCEPTING;
+        static LONG firstIn = 0;
+        if (InterlockedExchange(&firstIn, 1) == 0) XavcLog("ProcessInput: first compressed sample");
         s->AddRef(); m_pending = s; m_haveInput = TRUE;
         if (FAILED(s->GetSampleTime(&m_time))) m_time = 0;
         if (FAILED(s->GetSampleDuration(&m_dur))) m_dur = (LONGLONG)(10000000.0 * m_fpsD / (m_fpsN ? m_fpsN : 30000));
@@ -324,45 +338,46 @@ static const wchar_t* kFriendly = L"XAVC H.264 4:2:2 Decoder (diagnostic)";
 static const GUID CAT_VIDEO_DECODER =
     { 0xd6c02d4b, 0x6833, 0x45b4, { 0x97, 0x1a, 0x05, 0xa4, 0xb0, 0x4b, 0xab, 0x91 } };
 
-// Register by writing the MediaFoundation\Transforms registry entries directly.
-// MFTRegister() was observed to return S_OK yet persist nothing on Win11 26H2, so
-// we write the exact keys MFTEnumEx reads.
-static HRESULT RegisterMFT() {
+// Merit to register with (0 = none). Set through DllInstall("merit=N") for the
+// ordering experiments; MFTEnumEx sorts MFTs that have a merit ahead of the
+// Preferred list, if Media Foundation honours it for this MFT.
+static UINT32 g_regMerit = 0;
+
+// An earlier build wrote "{GUID}"-style keys by hand. MFTRegister (and Windows'
+// own MFTs) use brace-less GUID strings, so drop the leftovers.
+static void RemoveLegacyBraceKeys() {
     wchar_t clsid[64]; StringFromGUID2(CLSID_XavcH264Decoder, clsid, 64);
     wchar_t cat[64];   StringFromGUID2(CAT_VIDEO_DECODER, cat, 64);
+    wchar_t path[256];
+    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\Categories\\%ls\\%ls", cat, clsid);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, path);
+    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\Categories\\%ls", cat);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, path);   // fails harmlessly unless now empty
+    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\%ls", clsid);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, path);
+}
 
+static HRESULT RegisterMFT() {
     MFT_REGISTER_TYPE_INFO in[1]  = { { MFMediaType_Video, XAVC_VideoFormat_H264 } };
     MFT_REGISTER_TYPE_INFO out[3] = { { MFMediaType_Video, XAVC_VideoFormat_NV12 },
                                       { MFMediaType_Video, XAVC_VideoFormat_P010 },
                                       { MFMediaType_Video, XAVC_VideoFormat_Y210 } };
-
-    wchar_t path[256];
-    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\%ls", clsid);
-    HKEY k;
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) != ERROR_SUCCESS)
-        return E_ACCESSDENIED;
-    RegSetValueExW(k, NULL, 0, REG_SZ, (const BYTE*)kFriendly, (DWORD)((wcslen(kFriendly) + 1) * 2));
-    DWORD flags = MFT_ENUM_FLAG_SYNCMFT;
-    RegSetValueExW(k, L"MFTFlags",   0, REG_DWORD,  (const BYTE*)&flags, sizeof(flags));
-    RegSetValueExW(k, L"InputTypes", 0, REG_BINARY, (const BYTE*)in,  sizeof(in));
-    RegSetValueExW(k, L"OutputTypes",0, REG_BINARY, (const BYTE*)out, sizeof(out));
-    RegCloseKey(k);
-
-    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\Categories\\%ls\\%ls", cat, clsid);
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) == ERROR_SUCCESS)
-        RegCloseKey(k);
-    XavcLog("RegisterMFT: wrote Transforms + category keys");
-    return S_OK;
+    IMFAttributes* attrs = NULL;
+    if (g_regMerit && SUCCEEDED(MFCreateAttributes(&attrs, 1)))
+        attrs->SetUINT32(MFT_CODEC_MERIT_Attribute, g_regMerit);
+    // MFTRegister does not remove values from a previous registration (e.g. an old
+    // "Attributes" blob), so start from a clean key.
+    MFTUnregister(CLSID_XavcH264Decoder);
+    HRESULT hr = MFTRegister(CLSID_XavcH264Decoder, CAT_VIDEO_DECODER, (LPWSTR)kFriendly,
+                             MFT_ENUM_FLAG_SYNCMFT, 1, in, 3, out, attrs);
+    if (attrs) attrs->Release();
+    XavcLog("MFTRegister merit=%u hr=0x%08lx", g_regMerit, (unsigned long)hr);
+    return hr;
 }
 
 static void UnregisterMFT() {
-    wchar_t clsid[64]; StringFromGUID2(CLSID_XavcH264Decoder, clsid, 64);
-    wchar_t cat[64];   StringFromGUID2(CAT_VIDEO_DECODER, cat, 64);
-    wchar_t path[256];
-    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\Categories\\%ls\\%ls", cat, clsid);
-    RegDeleteKeyW(HKEY_LOCAL_MACHINE, path);
-    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\%ls", clsid);
-    RegDeleteKeyW(HKEY_LOCAL_MACHINE, path);
+    MFTUnregister(CLSID_XavcH264Decoder);
+    RemoveLegacyBraceKeys();
 }
 
 static HRESULT WriteClsidKeys() {
@@ -390,14 +405,29 @@ STDAPI DllRegisterServer() {
     XavcLog("DllRegisterServer");
     HRESULT hr = WriteClsidKeys();
     if (FAILED(hr)) { XavcLog("WriteClsidKeys failed 0x%08lx", (unsigned long)hr); return hr; }
+    RemoveLegacyBraceKeys();
+    MFStartup(MF_VERSION, MFSTARTUP_LITE);
     hr = RegisterMFT();
-    XavcLog("RegisterMFT hr=0x%08lx", (unsigned long)hr);
+    MFShutdown();
     return hr;
+}
+
+STDAPI DllUnregisterServer();
+
+// regsvr32 /n /i:"merit=8" xavc_decoder.dll registers with a merit attribute.
+STDAPI DllInstall(BOOL install, PCWSTR cmd) {
+    if (!install) return DllUnregisterServer();
+    g_regMerit = 0;
+    const wchar_t* m = cmd ? wcsstr(cmd, L"merit=") : NULL;
+    if (m) g_regMerit = (UINT32)wcstoul(m + 6, NULL, 0);
+    return DllRegisterServer();
 }
 
 STDAPI DllUnregisterServer() {
     XavcLog("DllUnregisterServer");
+    MFStartup(MF_VERSION, MFSTARTUP_LITE);
     UnregisterMFT();
+    MFShutdown();
     wchar_t guid[64]; StringFromGUID2(CLSID_XavcH264Decoder, guid, 64);
     wchar_t keyClsid[96]; _snwprintf(keyClsid, 96, L"CLSID\\%ls", guid);
     wchar_t sub[160];

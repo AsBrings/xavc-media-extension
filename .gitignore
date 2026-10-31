@@ -4,3 +4,11 @@ build/out/
 *.dll
 *.exe
 *.zip
+# test media (multi-GB camera files must never be committed)
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.mxf
+*.MXF
+*.bmp
