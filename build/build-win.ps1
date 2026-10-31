@@ -11,7 +11,9 @@
 # the link step also passes explicit -B/-L dirs under -MinGW.
 
 param(
-    [string]$MinGW = $env:XAVC_MINGW
+    [string]$MinGW = $env:XAVC_MINGW,
+    # Optional: an FFmpeg "shared" dev build (include\, lib\, bin\) to also build tools\avtest.
+    [string]$FFmpeg = $env:XAVC_FFMPEG
 )
 $ErrorActionPreference = 'Stop'
 
@@ -66,3 +68,12 @@ Invoke-Step '[harness] mftest.exe' (@('-O2', '-municode', '-D_WIN32_WINNT=0x0A00
     '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-loleaut32', '-luuid', '-lshell32', '-lgdi32', '-luser32',
     '-ld3d11'))
 Write-Host "OK -> $out\mftest.exe"
+
+if ($FFmpeg) {
+    # libavcodec decode-core check; the FFmpeg DLLs are copied next to it.
+    Invoke-Step '[ffmpeg] avtest.exe' (@('-O2', '-x', 'c', "-I$FFmpeg\include", '-o', "$out\avtest.exe",
+        "$root\tools\avtest\avtest.c", '-x', 'none', "-L$FFmpeg\lib") + $searchDirs + @(
+        '-static-libgcc', '-static-libstdc++', '-lavformat', '-lavcodec', '-lavutil', '-lswscale'))
+    Copy-Item (Join-Path $FFmpeg 'bin\*.dll') $out -Force
+    Write-Host "OK -> $out\avtest.exe"
+}
