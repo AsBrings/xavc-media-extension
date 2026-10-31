@@ -10,7 +10,7 @@
 | `yvid-a7siii-C0054-xavcsi-alli-42210bit-4k24p240Mbps.MP4` | **XAVC S-I** (All-Intra) | 4:2:2 10bit | 3840×2160 | 24p | 240M | 772 MB |
 | `yvid-a7siii-C0100-xavcsi-alli-42210bit-4k30p300Mbps.MP4` | XAVC S-I | 4:2:2 10bit | 4K | 30p | 300M | 2.32 GB |
 | `yvid-a7siii-C0099-xavcsi-alli-42210bit-4k60p600Mbps.MP4` | XAVC S-I | 4:2:2 10bit | 4K | 60p | 600M | 3.86 GB |
-| `yvid-a7siii-C0069-xavcs-42210bit-4k60p200Mbps.MP4.MP4` | **XAVC S** (Long GOP) | 4:2:2 10bit | 4K | 60p | 200M | 1.48 GB |
+| `yvid-a7siii-C0069-xavcs-42210bit-4k60p200Mbps.MP4` | **XAVC S** (Long GOP) | 4:2:2 10bit | 4K | 60p | 200M | 1.48 GB |
 | `yvid-a7siii-C0070-xavcs-4208bit-4k60p150Mbps.MP4` | XAVC S | 4:2:0 8bit（内置可解，对照组） | 4K | 60p | 150M | 1.48 GB |
 
 ## 已核对的流特征（C0054，用 `tools/` 的 mp4 解析确认）
@@ -25,5 +25,7 @@
 从 C0054 无损截取前 72 帧（3.0s，约 73MB）作为快速测试片，命名约定：
 `xavc-si_4k24p_422_10bit_3s.MP4`。因 S-I 为全帧内、无 B 帧重排，按样本前缀截取不改变画面。
 （Long GOP 的 XAVC S 不可简单截取，需保留 ctts 帧序信息——测试时请下载完整文件。）
+
+> 页面上 C0069 的链接写成了双后缀 `.MP4.MP4`（笔误），正确地址是单个 `.MP4`。
 
 > 注意：样片仅用于本插件的解码测试，版权归原拍摄者 / Imaging Resource。
