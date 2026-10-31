@@ -320,14 +320,49 @@ private:
 // ----------------------- registration -----------------------
 static const wchar_t* kFriendly = L"XAVC H.264 4:2:2 Decoder (diagnostic)";
 
+// MFT_CATEGORY_VIDEO_DECODER
+static const GUID CAT_VIDEO_DECODER =
+    { 0xd6c02d4b, 0x6833, 0x45b4, { 0x97, 0x1a, 0x05, 0xa4, 0xb0, 0x4b, 0xab, 0x91 } };
+
+// Register by writing the MediaFoundation\Transforms registry entries directly.
+// MFTRegister() was observed to return S_OK yet persist nothing on Win11 26H2, so
+// we write the exact keys MFTEnumEx reads.
 static HRESULT RegisterMFT() {
+    wchar_t clsid[64]; StringFromGUID2(CLSID_XavcH264Decoder, clsid, 64);
+    wchar_t cat[64];   StringFromGUID2(CAT_VIDEO_DECODER, cat, 64);
+
     MFT_REGISTER_TYPE_INFO in[1]  = { { MFMediaType_Video, XAVC_VideoFormat_H264 } };
     MFT_REGISTER_TYPE_INFO out[3] = { { MFMediaType_Video, XAVC_VideoFormat_NV12 },
                                       { MFMediaType_Video, XAVC_VideoFormat_P010 },
                                       { MFMediaType_Video, XAVC_VideoFormat_Y210 } };
-    return MFTRegister(CLSID_XavcH264Decoder, MFT_CATEGORY_VIDEO_DECODER,
-                       (LPWSTR)kFriendly, MFT_ENUM_FLAG_SYNCMFT,
-                       1, in, 3, out, NULL);
+
+    wchar_t path[256];
+    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\%ls", clsid);
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) != ERROR_SUCCESS)
+        return E_ACCESSDENIED;
+    RegSetValueExW(k, NULL, 0, REG_SZ, (const BYTE*)kFriendly, (DWORD)((wcslen(kFriendly) + 1) * 2));
+    DWORD flags = MFT_ENUM_FLAG_SYNCMFT;
+    RegSetValueExW(k, L"MFTFlags",   0, REG_DWORD,  (const BYTE*)&flags, sizeof(flags));
+    RegSetValueExW(k, L"InputTypes", 0, REG_BINARY, (const BYTE*)in,  sizeof(in));
+    RegSetValueExW(k, L"OutputTypes",0, REG_BINARY, (const BYTE*)out, sizeof(out));
+    RegCloseKey(k);
+
+    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\Categories\\%ls\\%ls", cat, clsid);
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) == ERROR_SUCCESS)
+        RegCloseKey(k);
+    XavcLog("RegisterMFT: wrote Transforms + category keys");
+    return S_OK;
+}
+
+static void UnregisterMFT() {
+    wchar_t clsid[64]; StringFromGUID2(CLSID_XavcH264Decoder, clsid, 64);
+    wchar_t cat[64];   StringFromGUID2(CAT_VIDEO_DECODER, cat, 64);
+    wchar_t path[256];
+    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\Categories\\%ls\\%ls", cat, clsid);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, path);
+    _snwprintf(path, 256, L"SOFTWARE\\Classes\\MediaFoundation\\Transforms\\%ls", clsid);
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE, path);
 }
 
 static HRESULT WriteClsidKeys() {
@@ -355,18 +390,14 @@ STDAPI DllRegisterServer() {
     XavcLog("DllRegisterServer");
     HRESULT hr = WriteClsidKeys();
     if (FAILED(hr)) { XavcLog("WriteClsidKeys failed 0x%08lx", (unsigned long)hr); return hr; }
-    MFStartup(MF_VERSION, MFSTARTUP_LITE);
     hr = RegisterMFT();
-    MFShutdown();
     XavcLog("RegisterMFT hr=0x%08lx", (unsigned long)hr);
     return hr;
 }
 
 STDAPI DllUnregisterServer() {
     XavcLog("DllUnregisterServer");
-    MFStartup(MF_VERSION, MFSTARTUP_LITE);
-    MFTUnregister(CLSID_XavcH264Decoder);
-    MFShutdown();
+    UnregisterMFT();
     wchar_t guid[64]; StringFromGUID2(CLSID_XavcH264Decoder, guid, 64);
     wchar_t keyClsid[96]; _snwprintf(keyClsid, 96, L"CLSID\\%ls", guid);
     wchar_t sub[160];
