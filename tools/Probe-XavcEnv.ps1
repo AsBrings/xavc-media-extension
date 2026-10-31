@@ -1,14 +1,18 @@
 <#
-    Probe-XavcEnv.ps1  --  XAVC Media Extension 环境/素材探测脚本
+    Probe-XavcEnv.ps1  --  XAVC Media Extension environment / sample probe
 
-    作用：只读地收集做解码器插件需要的信息，并把你的 XAVC 文件规格解析出来。
-    不修改系统、不写注册表、不联网。可以放心运行。
+    Read-only. Does NOT modify the system, registry, or network.
+    Collects hardware / OS info, installed media codec extensions, and parses
+    your Sony XAVC files (resolution / fps / bitrate + H.264 avcC profile).
 
-    用法（PowerShell，普通权限即可）：
-        powershell -ExecutionPolicy Bypass -File .\Probe-XavcEnv.ps1 -Sample "D:\DCIM\xxxx.MP4"
+    NOTE: This file is intentionally ASCII-only so Windows PowerShell 5.1 can
+    read it regardless of system locale.
 
-    -Sample 可给一个或多个你的索尼视频文件（S / S-I / HS 各来一个最好）。
-    把屏幕上 ===COPY START=== 到 ===COPY END=== 之间的全部内容贴回来给我即可。
+    Usage (PowerShell, normal user is fine):
+        powershell -ExecutionPolicy Bypass -File .\Probe-XavcEnv.ps1 -Sample "C:\path\clip.MP4"
+
+    -Sample takes one or more of your Sony files (S / S-I / HS each is ideal).
+    Copy everything between ===COPY START=== and ===COPY END=== back to me.
 #>
 
 [CmdletBinding()]
@@ -17,30 +21,29 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$out = [System.Collections.Generic.List[string]]::new()
-function W([string]$s) { $out.Add($s); Write-Host $s }
+function W([string]$s) { Write-Host $s }
 
 W "===COPY START==="
-W "XAVC-PROBE v1  $(Get-Date -Format s)"
+W ("XAVC-PROBE v2  {0}" -f (Get-Date -Format s))
 
 # ---------- OS ----------
 try {
     $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     W ("OS         : {0} build {1}.{2} ({3})" -f $cv.ProductName, $cv.CurrentBuild, $cv.UBR, $cv.DisplayVersion)
-} catch { W "OS         : <read failed> $_" }
+} catch { W "OS         : <read failed>" }
 
 # ---------- CPU ----------
 try {
     $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
     W ("CPU        : {0} | {1}C/{2}T" -f $cpu.Name.Trim(), $cpu.NumberOfCores, $cpu.NumberOfLogicalProcessors)
-} catch { W "CPU        : <read failed> $_" }
+} catch { W "CPU        : <read failed>" }
 
 # ---------- GPU ----------
 try {
     foreach ($g in Get-CimInstance Win32_VideoController) {
-        W ("GPU        : {0} | driver {1} | {2} MB" -f $g.Name, $g.DriverVersion, [int]($g.AdapterRAM/1MB))
+        W ("GPU        : {0} | driver {1}" -f $g.Name, $g.DriverVersion)
     }
-} catch { W "GPU        : <read failed> $_" }
+} catch { W "GPU        : <read failed>" }
 
 # ---------- Media codec extensions installed ----------
 W "--- installed media extensions ---"
@@ -64,15 +67,15 @@ try {
 W "--- sideload / dev mode ---"
 try {
     $ax = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -ErrorAction SilentlyContinue
-    W ("  AllowAllTrustedApps            = {0}" -f ($ax.AllowAllTrustedApps))
-    W ("  AllowDevelopmentWithoutDevLic. = {0}" -f ($ax.AllowDevelopmentWithoutDevLicense))
+    W ("  AllowAllTrustedApps             = {0}" -f ($ax.AllowAllTrustedApps))
+    W ("  AllowDevelopmentWithoutDevLicense = {0}" -f ($ax.AllowDevelopmentWithoutDevLicense))
 } catch { W "  <AppModelUnlock not set>" }
 
 # ---------- hardware MFT hint from registry ----------
-W "--- registered hardware MFTs (name hints) ---"
+W "--- hardware MFT registry hint ---"
 try {
     $hw = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows Media Foundation\HardwareMFT' -ErrorAction SilentlyContinue
-    if ($hw) { W ("  HardwareMFT key present, {0} enabled entries" -f $hw.Count) } else { W "  (no HardwareMFT key)" }
+    if ($hw) { W ("  HardwareMFT key present ({0} entries)" -f $hw.Count) } else { W "  (no HardwareMFT key)" }
 } catch { W "  <read failed>" }
 
 # ================= sample file analysis =================
@@ -84,7 +87,6 @@ function Get-ShellProp($folderObj, $fileObj, [string]$name) {
     return $null
 }
 
-# 在文件前若干字节里找 4CC box，取其后的编解码配置
 function Find-CodecBox([byte[]]$buf, [string]$tag) {
     $t = [System.Text.Encoding]::ASCII.GetBytes($tag)
     for ($i = 0; $i -le $buf.Length - ($t.Length + 8); $i++) {
@@ -113,31 +115,45 @@ if ($Sample) {
                 $v = Get-ShellProp $dir $item $prop
                 if ($v) { W ("  {0,-18}: {1}" -f $prop, $v) }
             }
-        } catch { W "  <shell props failed> $_" }
+        } catch { W "  <shell props failed>" }
 
-        # 读前 8MB 找 avcC(H.264) / hvcC(HEVC)
+        # read up to first 8MB, then tail, to find avcC(H.264) / hvcC(HEVC)
         try {
             $fs = [System.IO.File]::OpenRead($s)
-            $len = [Math]::Min(8MB, $fs.Length)
-            $buf = New-Object byte[] $len
-            [void]$fs.Read($buf, 0, $len)
+            $cfgLen = 0; $tag = ''; $prof = 0; $lvl = 0
+            function Scan([System.IO.FileStream]$fs, [long]$pos, [int]$len) {
+                $fs.Position = $pos
+                $b = New-Object byte[] $len
+                [void]$fs.Read($b, 0, $len)
+                return $b
+            }
+            $buf = Scan $fs 0 ([Math]::Min(8MB, $fs.Length))
+            $av = Find-CodecBox $buf 'avcC'
+            $hv = Find-CodecBox $buf 'hvcC'
+            if ($av -lt 0 -and $hv -lt 0 -and $fs.Length -gt 8MB) {
+                # moov likely at tail
+                $tlen = [int][Math]::Min(8MB, $fs.Length)
+                $buf = Scan $fs ($fs.Length - $tlen) $tlen
+                $av = Find-CodecBox $buf 'avcC'
+                $hv = Find-CodecBox $buf 'hvcC'
+            }
             $fs.Close()
 
-            $av = Find-CodecBox $buf 'avcC'
             if ($av -ge 0) {
-                $prof = $buf[$av + 5]      # configurationVersion(+4), AVCProfileIndication(+5)
+                $prof = $buf[$av + 5]
                 $lvl  = $buf[$av + 7]
                 $pn = $h264Profiles[[int]$prof]; if (-not $pn) { $pn = "profile_idc=$prof" }
                 W ("  H.264 avcC : profile_idc={0} ({1}), level={2}" -f $prof, $pn, $lvl)
-                if ($prof -eq 122 -or $prof -eq 110 -or $prof -eq 244) { W "  >>> 这是内置解码器不支持的高级 profile（需要我们的解码器）" }
+                if ($prof -eq 122 -or $prof -eq 110 -or $prof -eq 244) {
+                    W "  >>> advanced profile the built-in decoder cannot handle (needs our decoder)"
+                }
             }
-            $hv = Find-CodecBox $buf 'hvcC'
-            if ($hv -ge 0) { W "  HEVC hvcC : present (XAVC HS / H.265)" }
-            if ($av -lt 0 -and $hv -lt 0) { W "  <未在前8MB找到 avcC/hvcC，可能是 MXF 或 moov 在文件尾部>" }
-        } catch { W "  <codec box scan failed> $_" }
+            if ($hv -ge 0) { W "  HEVC hvcC  : present (XAVC HS / H.265)" }
+            if ($av -lt 0 -and $hv -lt 0) { W "  <no avcC/hvcC found; MXF or unusual layout>" }
+        } catch { W "  <codec box scan failed>" }
     }
 }
 
 W "===COPY END==="
 W ""
-W "完成。请把 ===COPY START=== 到 ===COPY END=== 之间的内容整段复制回来。"
+W "Done. Copy everything between ===COPY START=== and ===COPY END=== back to me."
