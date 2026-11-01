@@ -97,23 +97,37 @@ void PatchSource(IMFMediaSource* src) {
     XavcTrace("BSH: patched %u media type(s)", patched);
 }
 
-class CXavcByteStreamHandler : public IMFByteStreamHandler {
+// IMFAttributes: the source resolver reads MF_BYTESTREAMHANDLER_ACCEPTS_SHARE_WRITE from a
+// handler before using it for a file another process has open for writing (a copy in progress,
+// a camera / tethering app). The system MPEG-4 handler sets it; without it here the resolver
+// would skip us for such files and the 4:2:2 stream would end up at the in-box decoder.
+class CXavcByteStreamHandler : public IMFByteStreamHandler, public IMFAttributes {
 public:
-    CXavcByteStreamHandler() : m_cRef(1), m_inner(NULL) { InterlockedIncrement(&g_cObj); }
+    CXavcByteStreamHandler() : m_cRef(1), m_inner(NULL), m_attrs(NULL) { InterlockedIncrement(&g_cObj); }
     virtual ~CXavcByteStreamHandler() {
         if (m_inner) m_inner->Release();
+        if (m_attrs) m_attrs->Release();
         InterlockedDecrement(&g_cObj);
+    }
+
+    HRESULT Init() {
+        HRESULT hr = MFCreateAttributes(&m_attrs, 1);
+        if (SUCCEEDED(hr)) hr = m_attrs->SetUINT32(XAVC_MF_BYTESTREAMHANDLER_ACCEPTS_SHARE_WRITE, TRUE);
+        return hr;
     }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) {
         if (!ppv) return E_POINTER;
         if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, XAVC_IID_IMFByteStreamHandler)) {
             *ppv = static_cast<IMFByteStreamHandler*>(this);
-            AddRef();
-            return S_OK;
+        } else if (IsEqualIID(riid, IID_IMFAttributes)) {
+            *ppv = static_cast<IMFAttributes*>(this);
+        } else {
+            *ppv = NULL;
+            return E_NOINTERFACE;
         }
-        *ppv = NULL;
-        return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
     }
     STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&m_cRef); }
     STDMETHODIMP_(ULONG) Release() {
@@ -152,6 +166,38 @@ public:
         return m_inner ? m_inner->CancelObjectCreation(cancelCookie) : E_UNEXPECTED;
     }
 
+    // IMFAttributes, forwarded to our attribute store
+    STDMETHODIMP GetItem(REFGUID k, PROPVARIANT* v) { return m_attrs->GetItem(k, v); }
+    STDMETHODIMP GetItemType(REFGUID k, MF_ATTRIBUTE_TYPE* t) { return m_attrs->GetItemType(k, t); }
+    STDMETHODIMP CompareItem(REFGUID k, REFPROPVARIANT v, BOOL* r) { return m_attrs->CompareItem(k, v, r); }
+    STDMETHODIMP Compare(IMFAttributes* o, MF_ATTRIBUTES_MATCH_TYPE m, BOOL* r) { return m_attrs->Compare(o, m, r); }
+    STDMETHODIMP GetUINT32(REFGUID k, UINT32* v) { return m_attrs->GetUINT32(k, v); }
+    STDMETHODIMP GetUINT64(REFGUID k, UINT64* v) { return m_attrs->GetUINT64(k, v); }
+    STDMETHODIMP GetDouble(REFGUID k, double* v) { return m_attrs->GetDouble(k, v); }
+    STDMETHODIMP GetGUID(REFGUID k, GUID* v) { return m_attrs->GetGUID(k, v); }
+    STDMETHODIMP GetStringLength(REFGUID k, UINT32* n) { return m_attrs->GetStringLength(k, n); }
+    STDMETHODIMP GetString(REFGUID k, LPWSTR s, UINT32 n, UINT32* len) { return m_attrs->GetString(k, s, n, len); }
+    STDMETHODIMP GetAllocatedString(REFGUID k, LPWSTR* s, UINT32* n) { return m_attrs->GetAllocatedString(k, s, n); }
+    STDMETHODIMP GetBlobSize(REFGUID k, UINT32* n) { return m_attrs->GetBlobSize(k, n); }
+    STDMETHODIMP GetBlob(REFGUID k, UINT8* b, UINT32 n, UINT32* len) { return m_attrs->GetBlob(k, b, n, len); }
+    STDMETHODIMP GetAllocatedBlob(REFGUID k, UINT8** b, UINT32* n) { return m_attrs->GetAllocatedBlob(k, b, n); }
+    STDMETHODIMP GetUnknown(REFGUID k, REFIID riid, LPVOID* ppv) { return m_attrs->GetUnknown(k, riid, ppv); }
+    STDMETHODIMP SetItem(REFGUID k, REFPROPVARIANT v) { return m_attrs->SetItem(k, v); }
+    STDMETHODIMP DeleteItem(REFGUID k) { return m_attrs->DeleteItem(k); }
+    STDMETHODIMP DeleteAllItems() { return m_attrs->DeleteAllItems(); }
+    STDMETHODIMP SetUINT32(REFGUID k, UINT32 v) { return m_attrs->SetUINT32(k, v); }
+    STDMETHODIMP SetUINT64(REFGUID k, UINT64 v) { return m_attrs->SetUINT64(k, v); }
+    STDMETHODIMP SetDouble(REFGUID k, double v) { return m_attrs->SetDouble(k, v); }
+    STDMETHODIMP SetGUID(REFGUID k, REFGUID v) { return m_attrs->SetGUID(k, v); }
+    STDMETHODIMP SetString(REFGUID k, LPCWSTR v) { return m_attrs->SetString(k, v); }
+    STDMETHODIMP SetBlob(REFGUID k, const UINT8* b, UINT32 n) { return m_attrs->SetBlob(k, b, n); }
+    STDMETHODIMP SetUnknown(REFGUID k, IUnknown* u) { return m_attrs->SetUnknown(k, u); }
+    STDMETHODIMP LockStore() { return m_attrs->LockStore(); }
+    STDMETHODIMP UnlockStore() { return m_attrs->UnlockStore(); }
+    STDMETHODIMP GetCount(UINT32* n) { return m_attrs->GetCount(n); }
+    STDMETHODIMP GetItemByIndex(UINT32 i, GUID* k, PROPVARIANT* v) { return m_attrs->GetItemByIndex(i, k, v); }
+    STDMETHODIMP CopyAllItems(IMFAttributes* d) { return m_attrs->CopyAllItems(d); }
+
     STDMETHODIMP GetMaxNumberOfBytesRequiredForResolution(QWORD* pqw) {
         HRESULT hr = EnsureInner();
         if (FAILED(hr)) return hr;
@@ -175,6 +221,7 @@ private:
 
     LONG m_cRef;
     IMFByteStreamHandler* volatile m_inner;
+    IMFAttributes* m_attrs;
 };
 
 } // namespace
@@ -182,7 +229,8 @@ private:
 HRESULT XavcCreateByteStreamHandler(REFIID riid, void** ppv) {
     CXavcByteStreamHandler* h = new (std::nothrow) CXavcByteStreamHandler();
     if (!h) return E_OUTOFMEMORY;
-    HRESULT hr = h->QueryInterface(riid, ppv);
+    HRESULT hr = h->Init();
+    if (SUCCEEDED(hr)) hr = h->QueryInterface(riid, ppv);
     h->Release();
     return hr;
 }

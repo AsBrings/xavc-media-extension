@@ -516,7 +516,13 @@ public:
         for (int attempt = 0; attempt < 64; attempt++) {
             HRESULT hr = FetchFrame();
             if (hr != S_OK) return hr;
-            UINT32 fw = (UINT32)m_frame->width & ~1u, fh = (UINT32)m_frame->height & ~1u;
+            // Size as delivered: libavcodec leaves the top/left crop of GPU frames to us (DeliverFrame).
+            int vw = m_frame->width, vh = m_frame->height;
+            if (m_frame->hw_frames_ctx) {
+                vw -= (int)m_frame->crop_left;
+                vh -= (int)m_frame->crop_top;
+            }
+            UINT32 fw = (UINT32)(vw > 0 ? vw : 0) & ~1u, fh = (UINT32)(vh > 0 ? vh : 0) & ~1u;
             if (fw != m_info.w || fh != m_info.h) {
                 // The stream's real picture size differs from what the media type said:
                 // renegotiate the output type, then deliver this frame.

@@ -30,6 +30,8 @@ const wchar_t* kOurKey      = L"Software\\XavcDecoder";
 const wchar_t* kSavedKey    = L"Software\\XavcDecoder\\Saved";
 const wchar_t* kSelectors[] = { L".mp4", L"video/mp4" };
 const wchar_t* kAllAppPackagesSid = L"S-1-15-2-1";
+// Per-user marker Active Setup writes once it ran our StubPath for this user (installer).
+const wchar_t* kActiveSetupKey = L"Software\\Microsoft\\Active Setup\\Installed Components\\{7F9A3C2F-5E44-4B0A-9C1D-2A6B8E3D4F10}";
 
 void GuidString(REFGUID g, wchar_t* out) { StringFromGUID2(g, out, 64); }
 
@@ -216,6 +218,8 @@ HRESULT XavcUnregisterUser() {
     wchar_t granted[8];
     if (GetString(HKEY_CURRENT_USER, kOurKey, L"GrantedWmfRead", granted, 8)) RevokeAppContainerRead(kWmfKey);
     RegDeleteTreeW(HKEY_CURRENT_USER, kOurKey);
+    // Forget that Active Setup ran for this user, so a later (re)install enables the user again.
+    RegDeleteTreeW(HKEY_CURRENT_USER, kActiveSetupKey);
     XavcLog("per-user registration removed");
     return S_OK;
 }

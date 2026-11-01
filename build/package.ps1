@@ -29,6 +29,13 @@ Get-ChildItem (Join-Path $out 'swresample*.dll') -ErrorAction SilentlyContinue |
 foreach ($f in 'install.cmd', 'uninstall.cmd', 'Install-XavcDecoder.ps1', 'Uninstall-XavcDecoder.ps1', 'README.txt', 'THIRD_PARTY_NOTICES.txt') {
     Copy-Item (Join-Path $root "installer\$f") $pkg
 }
+# The installer registers this version (Settings > Apps, Active Setup).
+$inst = Join-Path $pkg 'Install-XavcDecoder.ps1'
+$text = [IO.File]::ReadAllText($inst)
+$pattern = "(?m)^\`$Version\s*=\s*'[^']*'"
+if (-not [regex]::IsMatch($text, $pattern)) { throw 'version line not found in Install-XavcDecoder.ps1' }
+$text = [regex]::Replace($text, $pattern, "`$Version    = '$Version'")
+[IO.File]::WriteAllText($inst, $text, (New-Object Text.UTF8Encoding($true)))   # keep the BOM (PowerShell 5.1)
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $pkg 'LICENSE.txt')
 # FFmpeg licence: our minimal build (build\ffmpeg-minimal.sh) is LGPL 2.1+; a full BtbN build is LGPL 3.
 $lic = @(@{ f = 'COPYING.LGPLv2.1'; to = 'FFmpeg-COPYING.LGPLv2.1.txt' }, @{ f = 'LICENSE.md'; to = 'FFmpeg-LICENSE.md' },

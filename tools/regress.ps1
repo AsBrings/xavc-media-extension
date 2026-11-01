@@ -12,8 +12,11 @@
 # the constant offset seen on the first frame.
 
 param(
-    [Parameter(Mandatory = $true)] [string]$SI,
-    [Parameter(Mandatory = $true)] [string]$LongGop,
+    [string]$SI,
+    [string]$LongGop,
+    # More clips (any H.264 profile the decoder takes): each is decoded in all four output
+    # formats and compared with the reference. Clips the decoder must refuse are reported.
+    [string[]]$Extra = @(),
     [int]$Frames = 30
 )
 $ErrorActionPreference = 'Stop'
@@ -77,20 +80,38 @@ function Compare-Frames([string]$name, $ref, $dec, [bool]$alignOffset) {
     Write-Host ("{0} {1,-28} {2,4} frames: {3} match, {4} differ, {5} not in reference {6}" -f $status, $name, $dec.Count, $ok, $bad, $missing, $firstBad)
 }
 
-$refSI = Get-Reference $SI 100000
-foreach ($fmt in 'P010', 'Y210', 'NV12', 'YUY2') {
-    Compare-Frames "S-I $fmt" $refSI (Get-Decoded @('decode', $SI, $fmt, "$Frames")) $false
+if ($SI) {
+    $refSI = Get-Reference $SI 100000
+    foreach ($fmt in 'P010', 'Y210', 'NV12', 'YUY2') {
+        Compare-Frames "S-I $fmt" $refSI (Get-Decoded @('decode', $SI, $fmt, "$Frames")) $false
+    }
+    $lastT = $refSI[$refSI.Count - 1].t
+    $tail = Get-Decoded @('decode', $SI, 'Y210', '1000', '-', ('{0:F3}' -f ($lastT / 1e7 - 1.5)))
+    Compare-Frames 'S-I end of stream (Y210)' $refSI $tail $false
+    if ($tail.Count -and [Math]::Abs($tail[$tail.Count - 1].t - $lastT) -gt 2) {
+        Write-Host "FAIL last frame is t=$($tail[$tail.Count - 1].t), expected t=$lastT"; $script:failures++
+    }
 }
-$lastT = $refSI[$refSI.Count - 1].t
-$tail = Get-Decoded @('decode', $SI, 'Y210', '1000', '-', ('{0:F3}' -f ($lastT / 1e7 - 1.5)))
-Compare-Frames 'S-I end of stream (Y210)' $refSI $tail $false
-if ($tail.Count -and [Math]::Abs($tail[$tail.Count - 1].t - $lastT) -gt 2) {
-    Write-Host "FAIL last frame is t=$($tail[$tail.Count - 1].t), expected t=$lastT"; $script:failures++
+if ($LongGop) {
+    $refLG = Get-Reference $LongGop 760
+    Compare-Frames 'Long GOP P010' $refLG (Get-Decoded @('decode', $LongGop, 'P010', '90')) $true
+    Compare-Frames 'Long GOP seek 10.5 s (Y210)' $refLG (Get-Decoded @('decode', $LongGop, 'Y210', '60', '-', '10.5')) $true
 }
 
-$refLG = Get-Reference $LongGop 760
-Compare-Frames 'Long GOP P010' $refLG (Get-Decoded @('decode', $LongGop, 'P010', '90')) $true
-Compare-Frames 'Long GOP seek 10.5 s (Y210)' $refLG (Get-Decoded @('decode', $LongGop, 'Y210', '60', '-', '10.5')) $true
+# Extra clips: every output format (the converter handles any source layout -> any format).
+foreach ($clip in $Extra) {
+    $name = [IO.Path]::GetFileNameWithoutExtension($clip)
+    $ref = Get-Reference $clip $Frames
+    foreach ($fmt in 'P010', 'Y210', 'NV12', 'YUY2') {
+        $dec = Get-Decoded @('decode', $clip, $fmt, "$Frames")
+        if ($dec.Count -eq 0) {
+            $why = (& $mftest decode $clip $fmt 1 | Select-String 'SetCurrentMediaType') -join ''
+            Write-Host ("REFUSED {0,-36} {1}" -f "$name $fmt", $why)
+            continue
+        }
+        Compare-Frames "$name $fmt" $ref $dec $true
+    }
+}
 
 if ($script:failures) { Write-Host "$script:failures check(s) FAILED"; exit 1 }
 Write-Host 'all checks passed'
