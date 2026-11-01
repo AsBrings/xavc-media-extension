@@ -13,3 +13,6 @@ build/out/
 *.MXF
 *.bmp
 build/package/
+# personal session logs kept in the working folder
+/log.txt
+/log.zh.md
