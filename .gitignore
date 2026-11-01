@@ -1,0 +1,18 @@
+build/out/
+*.o
+*.obj
+*.dll
+*.exe
+*.zip
+# test media (multi-GB camera files must never be committed)
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.mxf
+*.MXF
+*.bmp
+build/package/
+# personal session logs kept in the working folder
+/log.txt
+/log.zh.md
