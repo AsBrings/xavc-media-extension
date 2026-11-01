@@ -1,6 +1,5 @@
-// xavc_common.h - shared GUIDs, logging, helpers for the XAVC decoder MFT.
+// xavc_common.h - shared declarations for the XAVC Media Foundation components.
 #pragma once
-#define COBJMACROS
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <mfapi.h>
@@ -8,8 +7,8 @@
 #include <mftransform.h>
 #include <mferror.h>
 #include <mfobjects.h>
-#include <strmif.h>
 #include <stdio.h>
+#include <stdint.h>
 
 // Our GUIDs (CLSID + FourCC media subtypes). Declared extern here; defined once
 // in guids.cpp (which includes <initguid.h>). Keeps us from re-defining MF GUIDs
@@ -30,38 +29,50 @@ struct IMFByteStreamHandler : public IUnknown {
 };
 #endif
 
-// Live COM objects in this DLL (DllCanUnloadNow).
-extern volatile LONG g_cObj;
+// IMFQualityAdvise / IMFQualityAdvise2 (mfidl.h in the Windows SDK; mingw-w64 only has the
+// enums). The pipeline's quality manager uses them to ask a decoder to work less when
+// playback falls behind.
+#ifndef __IMFQualityAdvise_INTERFACE_DEFINED__
+#define __IMFQualityAdvise_INTERFACE_DEFINED__
+struct IMFQualityAdvise : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE SetDropMode(MF_QUALITY_DROP_MODE eDropMode) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetQualityLevel(MF_QUALITY_LEVEL eQualityLevel) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDropMode(MF_QUALITY_DROP_MODE* peDropMode) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetQualityLevel(MF_QUALITY_LEVEL* peQualityLevel) = 0;
+    virtual HRESULT STDMETHODCALLTYPE DropTime(LONGLONG hnsAmountToDrop) = 0;
+};
+#endif
+#ifndef __IMFQualityAdvise2_INTERFACE_DEFINED__
+#define __IMFQualityAdvise2_INTERFACE_DEFINED__
+struct IMFQualityAdvise2 : public IMFQualityAdvise {
+    virtual HRESULT STDMETHODCALLTYPE NotifyQualityEvent(IMFMediaEvent* pEvent, DWORD* pdwFlags) = 0;
+};
+#endif
 
-// xavc_bsh.cpp
-HRESULT XavcCreateByteStreamHandler(REFIID riid, void** ppv);
+extern HMODULE g_hInst;            // this DLL (xavc_dll.cpp)
+extern volatile LONG g_cObj;       // live COM objects (DllCanUnloadNow)
 
-// ---- Logging (robust across normal + AppContainer hosts) ----
-// Primary sink: OutputDebugStringA (captured by DebugView, even from AppContainer).
-// Secondary: a file the installer makes world/AppContainer-writable.
-static inline void XavcLog(const char* fmt, ...) {
-    char buf[1024];
-    va_list ap; va_start(ap, fmt);
-    _vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
-    va_end(ap);
-    buf[sizeof(buf) - 2] = 0;
-    size_t n = strlen(buf);
-    // tag + newline
-    char line[1152];
-    DWORD pid = GetCurrentProcessId();
-    _snprintf(line, sizeof(line) - 1, "[XAVC pid=%lu] %s\r\n", (unsigned long)pid, buf);
-    line[sizeof(line) - 1] = 0;
-    OutputDebugStringA(line);
-    HANDLE h = CreateFileA("C:\\ProgramData\\XavcDecoder\\xavc.log",
-        FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h != INVALID_HANDLE_VALUE) {
-        DWORD w = 0; SetFilePointer(h, 0, NULL, FILE_END);
-        WriteFile(h, line, (DWORD)strlen(line), &w, NULL);
-        CloseHandle(h);
-    }
-    (void)n;
-}
+HRESULT XavcCreateByteStreamHandler(REFIID riid, void** ppv);   // xavc_bsh.cpp
+HRESULT XavcCreateDecoder(REFIID riid, void** ppv);             // xavc_decoder.cpp
+
+// ---- Settings (xavc_util.cpp) ----
+// REG_DWORD values under HKCU\Software\XavcDecoder, then HKLM\SOFTWARE\XavcDecoder; read once
+// per process. (Sandboxed hosts such as the Media Player can always read the HKLM key; the
+// HKCU key only if ALL APPLICATION PACKAGES has been granted read access to it.)
+struct XavcSettings {
+    DWORD logLevel;      // LogLevel:       0 = off (default), 1 = info, 2 = trace every call
+    DWORD hwDecode;      // HardwareDecode: 1 = use a GPU decoder when one supports the stream (default), 0 = never
+    DWORD outputFormat;  // OutputFormat:   0 = auto: keep 4:2:2 (Y210/YUY2) first, then 4:2:0 fallbacks (default)
+                         //                 1 = 4:2:0 only (P010 for 10-bit, NV12)   2 = NV12 only
+    DWORD threads;       // DecoderThreads: 0 = automatic (default)
+};
+const XavcSettings& XavcGetSettings();
+
+// ---- Logging (xavc_util.cpp) ----
+// OutputDebugString + %ProgramData%\XavcDecoder\xavc.log, only when LogLevel >= level.
+void XavcLogAt(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+#define XavcLog(...)   XavcLogAt(1, __VA_ARGS__)
+#define XavcTrace(...) XavcLogAt(2, __VA_ARGS__)
 
 // Locate the SPS NAL in an H.264 codec-config blob (either avcC or Annex-B / raw
 // SPS+PPS), and return profile_idc, or -1 if not found.

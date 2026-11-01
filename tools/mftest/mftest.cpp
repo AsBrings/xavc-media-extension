@@ -5,7 +5,12 @@
 //   mftest read  <file> [rgb|d3d]    decode through IMFSourceReader (NV12 output; "rgb" = RGB32
 //                                    with video processing like the thumbnail extractor;
 //                                    "d3d" = with a D3D11 device manager / DXVA like the Media Engine)
+//   mftest decode <file> <NV12|P010|Y210|YUY2> [n] [first.bmp|-] [seek_seconds]
+//                                    decode with that output format, print per-frame times and
+//                                    luma hashes (compare with "avtest <file> hash")
+//   mftest samples <file> [n]        the compressed samples the source delivers
 //   mftest thumb <file> <out.bmp>    Explorer thumbnail via IShellItemImageFactory
+//   mftest thumbforce <file> [bmp]   re-extract it, replacing the cached one (IThumbnailCache)
 //   mftest open  <aumid> <file>      activate a packaged app for a file (like double-click);
 //                                    prints the app's process id
 //
@@ -18,6 +23,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mftransform.h>
@@ -25,8 +31,10 @@
 #include <mferror.h>
 #include <shobjidl.h>
 #include <shlobj.h>
+#include <thumbcache.h>
 #include <d3d11.h>
 #include <d3d10.h>
+#include <dxgi.h>
 
 #define FOURCC_GUID(fcc) { fcc, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }
 static const GUID kFmtH264  = FOURCC_GUID(0x34363248);   // 'H264'
@@ -38,6 +46,8 @@ static const GUID kClsidXavc =
     { 0x0b1e6d2a, 0x7c3f, 0x4a58, { 0x9e, 0x21, 0x6f, 0x4d, 0x8c, 0x0a, 0x3b, 0x71 } };
 static const GUID kClsidXavcOld =
     { 0x7f9a3c21, 0x5e44, 0x4b0a, { 0x9c, 0x1d, 0x2a, 0x6b, 0x8e, 0x3d, 0x4f, 0x10 } };
+static const CLSID kClsidLocalThumbnailCache =
+    { 0x50ef4544, 0xac9f, 0x4a8e, { 0xb2, 0x1b, 0x8a, 0x26, 0x18, 0x0d, 0xb1, 0x3f } };
 static const CLSID kClsidAppActivationMgr =
     { 0x45ba127d, 0x10a8, 0x46ea, { 0x8a, 0xb7, 0x56, 0xea, 0x90, 0x78, 0x94, 0x3c } };
 static const IID kIidAppActivationMgr =
@@ -281,6 +291,295 @@ static int CmdRead(const wchar_t* path, bool rgb, bool d3d) {
     return frames > 0 ? 0 : 3;
 }
 
+// ---------------------------------------------------------------- decode
+static void SaveBmp(const wchar_t* out, const BYTE* px, int w, int h);
+
+// mftest decode <file> <NV12|P010|Y210|YUY2> [n] [first.bmp]
+// Decodes through IMFSourceReader with the given decoder output format and prints, per frame,
+// the time and the same luma hashes as "avtest <file> hash" (h10 for 10-bit output, h8 for
+// 8-bit), so the MF pipeline can be compared frame by frame with plain libavcodec.
+
+static const GUID kFmtP010 = FOURCC_GUID(0x30313050);
+static const GUID kFmtY210 = FOURCC_GUID(0x30313259);
+static const GUID kFmtYUY2 = FOURCC_GUID(0x32595559);
+
+// luma sample i of a row in each format, as a 16-bit MSB-aligned value
+static inline unsigned LumaAt(const BYTE* row, int x, int fmt) {
+    switch (fmt) {
+    case 0: return row[x] << 8;                                   // NV12
+    case 1: return ((const uint16_t*)row)[x];                     // P010
+    case 2: return ((const uint16_t*)row)[(x & ~1) * 2 + (x & 1) * 2];   // Y210: Y0 U Y1 V
+    default: return row[(x & ~1) * 2 + (x & 1) * 2] << 8;         // YUY2: Y0 U Y1 V
+    }
+}
+static inline void ChromaAt(const BYTE* p, LONG pitch, int w, int h, int x, int y, int fmt, unsigned* u, unsigned* v) {
+    if (fmt <= 1) {                                               // NV12 / P010: UV plane after Y
+        const BYTE* uvRow = p + (size_t)pitch * h + (size_t)pitch * (y / 2);
+        if (fmt == 0) { *u = uvRow[(x & ~1)] << 8; *v = uvRow[(x & ~1) + 1] << 8; }
+        else { *u = ((const uint16_t*)uvRow)[x & ~1]; *v = ((const uint16_t*)uvRow)[(x & ~1) + 1]; }
+    } else {
+        const BYTE* row = p + (size_t)pitch * y;
+        if (fmt == 2) { *u = ((const uint16_t*)row)[(x & ~1) * 2 + 1]; *v = ((const uint16_t*)row)[(x & ~1) * 2 + 3]; }
+        else { *u = row[(x & ~1) * 2 + 1] << 8; *v = row[(x & ~1) * 2 + 3] << 8; }
+    }
+    (void)w;
+}
+
+// BT.709 limited range -> BGRX, for a quick look at the picture.
+static void SaveFrameBmp(const wchar_t* out, const BYTE* p, LONG pitch, int w, int h, int fmt) {
+    BYTE* px = (BYTE*)malloc((size_t)w * h * 4);
+    if (!px) return;
+    for (int y = 0; y < h; y++) {
+        const BYTE* row = p + (size_t)pitch * y;
+        for (int x = 0; x < w; x++) {
+            double Y = LumaAt(row, x, fmt) / 65535.0 * 255.0;
+            unsigned uu, vv;
+            ChromaAt(p, pitch, w, h, x, y, fmt, &uu, &vv);
+            double U = uu / 65535.0 * 255.0 - 128.0, V = vv / 65535.0 * 255.0 - 128.0;
+            double c = (Y - 16.0) * 255.0 / 219.0;
+            double r = c + 1.5748 * 255.0 / 224.0 * V;
+            double g = c - 0.1873 * 255.0 / 224.0 * U - 0.4681 * 255.0 / 224.0 * V;
+            double b = c + 1.8556 * 255.0 / 224.0 * U;
+            BYTE* d = px + ((size_t)y * w + x) * 4;
+            d[0] = (BYTE)(b < 0 ? 0 : b > 255 ? 255 : b);
+            d[1] = (BYTE)(g < 0 ? 0 : g > 255 ? 255 : g);
+            d[2] = (BYTE)(r < 0 ? 0 : r > 255 ? 255 : r);
+            d[3] = 0;
+        }
+    }
+    SaveBmp(out, px, w, h);
+    free(px);
+}
+
+static int CmdDecode(const wchar_t* path, const wchar_t* fmtName, int count, const wchar_t* bmp, double seekTo) {
+    int fmt = -1;
+    const GUID* sub = NULL;
+    if (!_wcsicmp(fmtName, L"NV12")) { fmt = 0; sub = &kFmtNV12; }
+    else if (!_wcsicmp(fmtName, L"P010")) { fmt = 1; sub = &kFmtP010; }
+    else if (!_wcsicmp(fmtName, L"Y210")) { fmt = 2; sub = &kFmtY210; }
+    else if (!_wcsicmp(fmtName, L"YUY2")) { fmt = 3; sub = &kFmtYUY2; }
+    if (!sub) { printf("format must be NV12, P010, Y210 or YUY2\n"); return 64; }
+
+    IMFSourceReader* rd = NULL;
+    HRESULT hr = MFCreateSourceReaderFromURL(path, NULL, &rd);
+    if (FAILED(hr)) { printf("MFCreateSourceReaderFromURL hr=0x%08lX\n", (unsigned long)hr); return 1; }
+    const DWORD VID = (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
+    rd->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    rd->SetStreamSelection(VID, TRUE);
+    IMFMediaType* ot = NULL;
+    MFCreateMediaType(&ot);
+    ot->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    ot->SetGUID(MF_MT_SUBTYPE, *sub);
+    hr = rd->SetCurrentMediaType(VID, NULL, ot);
+    ot->Release();
+    printf("SetCurrentMediaType(%ls) hr=0x%08lX\n", fmtName, (unsigned long)hr);
+    if (FAILED(hr)) { rd->Release(); return 2; }
+
+    UINT32 w = 0, h = 0, stride = 0;
+    IMFMediaType* ct = NULL;
+    if (SUCCEEDED(rd->GetCurrentMediaType(VID, &ct))) {
+        MFGetAttributeSize(ct, MF_MT_FRAME_SIZE, &w, &h);
+        ct->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride);
+        ct->Release();
+    }
+    printf("output %ux%u default stride %u\n", w, h, stride);
+    if (seekTo > 0) {
+        PROPVARIANT pos;
+        PropVariantInit(&pos);
+        pos.vt = VT_I8;
+        pos.hVal.QuadPart = (LONGLONG)(seekTo * 1e7);
+        hr = rd->SetCurrentPosition(GUID_NULL, pos);
+        printf("SetCurrentPosition(%.3f s) hr=0x%08lX\n", seekTo, (unsigned long)hr);
+    }
+
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    int frames = 0;
+    bool firstTimeShown = false;
+    double firstFrameAt = 0;
+    while (frames < count) {
+        DWORD si = 0, fl = 0;
+        LONGLONG ts = 0;
+        IMFSample* s = NULL;
+        hr = rd->ReadSample(VID, 0, &si, &fl, &ts, &s);
+        if (FAILED(hr)) { printf("ReadSample hr=0x%08lX\n", (unsigned long)hr); break; }
+        if (fl & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) printf("(media type changed)\n");
+        if (!s) {
+            if (fl & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) { printf("end of stream (flags 0x%lX)\n", (unsigned long)fl); break; }
+            continue;
+        }
+        if (!firstTimeShown) {
+            QueryPerformanceCounter(&t1);
+            firstFrameAt = (double)(t1.QuadPart - t0.QuadPart) / f.QuadPart;
+            firstTimeShown = true;
+        }
+        IMFMediaBuffer* b = NULL;
+        s->ConvertToContiguousBuffer(&b);
+        IMF2DBuffer* b2 = NULL;
+        BYTE* p = NULL;
+        LONG pitch = (LONG)stride;
+        DWORD mx = 0, cur = 0;
+        if (b && SUCCEEDED(b->QueryInterface(IID_IMF2DBuffer, (void**)&b2))) b2->Lock2D(&p, &pitch);
+        else if (b) b->Lock(&p, &mx, &cur);
+        unsigned long long hh = 1469598103934665603ULL;
+        const unsigned long long P = 1099511628211ULL;
+        if (p) {
+            for (UINT32 y = 0; y < h; y++) {
+                const BYTE* row = p + (size_t)pitch * y;
+                for (UINT32 x = 0; x < w; x++) {
+                    unsigned v16 = LumaAt(row, (int)x, fmt);
+                    if (fmt == 1 || fmt == 2) { unsigned v10 = v16 >> 6; hh = (hh ^ (v10 & 0xff)) * P; hh = (hh ^ (v10 >> 8)) * P; }
+                    else hh = (hh ^ (v16 >> 8)) * P;
+                }
+            }
+            if (frames == 0 && bmp) SaveFrameBmp(bmp, p, pitch, (int)w, (int)h, fmt);
+        }
+        LONGLONG dur = 0;
+        s->GetSampleDuration(&dur);
+        printf("%5d t=%lld dur=%lld %s=%016llx%s\n", frames, ts, dur, (fmt == 1 || fmt == 2) ? "h10" : "h8", hh,
+               b2 ? " (2D)" : "");
+        if (b2) { b2->Unlock2D(); b2->Release(); } else if (b && p) b->Unlock();
+        if (b) b->Release();
+        s->Release();
+        frames++;
+    }
+    QueryPerformanceCounter(&t1);
+    double secs = (double)(t1.QuadPart - t0.QuadPart) / f.QuadPart;
+    printf("decoded %d frames in %.2f s (first after %.2f s)\n", frames, secs, firstFrameAt);
+
+    IMFSourceReaderEx* rx = NULL;
+    if (SUCCEEDED(rd->QueryInterface(IID_IMFSourceReaderEx, (void**)&rx))) {
+        for (DWORD i = 0;; i++) {
+            GUID cat;
+            IMFTransform* t = NULL;
+            if (FAILED(rx->GetTransformForStream(VID, i, &cat, &t))) break;
+            IUnknown* mark = NULL;
+            bool ours = SUCCEEDED(t->QueryInterface(kIidXavcMarker, (void**)&mark));
+            if (mark) mark->Release();
+            printf("pipeline transform %lu: %s\n", (unsigned long)i, ours ? "XAVC decoder" : "other");
+            t->Release();
+        }
+        rx->Release();
+    }
+    rd->Release();
+    return frames > 0 ? 0 : 3;
+}
+
+// ---------------------------------------------------------------- vpcaps
+// Which decoder output formats each GPU's D3D11 video processor accepts as input (the Media
+// Player renders through it, so this decides whether 4:2:2 Y210 output can be used).
+static int CmdVpCaps() {
+    IDXGIFactory1* fac = NULL;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&fac))) { printf("CreateDXGIFactory1 failed\n"); return 1; }
+    struct { DXGI_FORMAT f; const char* n; } fmts[] = {
+        { DXGI_FORMAT_NV12, "NV12" }, { DXGI_FORMAT_P010, "P010" }, { DXGI_FORMAT_YUY2, "YUY2" },
+        { DXGI_FORMAT_Y210, "Y210" }, { DXGI_FORMAT_Y216, "Y216" }, { DXGI_FORMAT_P016, "P016" },
+        { DXGI_FORMAT_AYUV, "AYUV" }, { DXGI_FORMAT_Y410, "Y410" } };
+    IDXGIAdapter1* ad = NULL;
+    for (UINT i = 0; fac->EnumAdapters1(i, &ad) != DXGI_ERROR_NOT_FOUND; i++) {
+        DXGI_ADAPTER_DESC1 d;
+        ad->GetDesc1(&d);
+        printf("adapter %u: %s (vendor 0x%04X)\n", i, U8(d.Description), d.VendorId);
+        ID3D11Device* dev = NULL;
+        ID3D11DeviceContext* ctx = NULL;
+        HRESULT hr = D3D11CreateDevice(ad, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                                       NULL, 0, D3D11_SDK_VERSION, &dev, NULL, &ctx);
+        ID3D11VideoDevice* vd = NULL;
+        if (SUCCEEDED(hr)) hr = dev->QueryInterface(__uuidof(ID3D11VideoDevice), (void**)&vd);
+        if (FAILED(hr)) { printf("   no D3D11 video device (0x%08lX)\n", (unsigned long)hr); }
+        else {
+            D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd = {};
+            cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+            cd.InputWidth = 3840; cd.InputHeight = 2160; cd.OutputWidth = 1920; cd.OutputHeight = 1080;
+            cd.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+            ID3D11VideoProcessorEnumerator* en = NULL;
+            hr = vd->CreateVideoProcessorEnumerator(&cd, &en);
+            if (FAILED(hr)) printf("   CreateVideoProcessorEnumerator 0x%08lX\n", (unsigned long)hr);
+            else {
+                printf("   video processor input:");
+                for (auto& f : fmts) {
+                    UINT flags = 0;
+                    en->CheckVideoProcessorFormat(f.f, &flags);
+                    printf(" %s=%s", f.n, (flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) ? "yes" : "no");
+                }
+                printf("\n");
+                en->Release();
+            }
+            vd->Release();
+        }
+        if (ctx) ctx->Release();
+        if (dev) dev->Release();
+        ad->Release();
+    }
+    fac->Release();
+    return 0;
+}
+
+// ---------------------------------------------------------------- samples
+// Print the compressed samples the media source delivers (no decoder): timestamps,
+// flags and the first bytes, i.e. exactly what a decoder MFT gets in ProcessInput.
+static int CmdSamples(const wchar_t* path, int count) {
+    IMFSourceReader* rd = NULL;
+    HRESULT hr = MFCreateSourceReaderFromURL(path, NULL, &rd);
+    printf("MFCreateSourceReaderFromURL hr=0x%08lX\n", (unsigned long)hr);
+    if (FAILED(hr)) return 1;
+    const DWORD VID = (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
+    rd->SetStreamSelection((DWORD)MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    rd->SetStreamSelection(VID, TRUE);
+    IMFMediaType* nt = NULL;
+    if (SUCCEEDED(rd->GetNativeMediaType(VID, 0, &nt))) {
+        DumpType("native type", nt);
+        rd->SetCurrentMediaType(VID, NULL, nt);   // compressed passthrough
+        nt->Release();
+    }
+    for (int k = 0; k < count; k++) {
+        DWORD si = 0, fl = 0;
+        LONGLONG ts = 0;
+        IMFSample* s = NULL;
+        hr = rd->ReadSample(VID, 0, &si, &fl, &ts, &s);
+        if (FAILED(hr) || !s) {
+            printf("ReadSample #%d hr=0x%08lX flags=0x%lX\n", k, (unsigned long)hr, (unsigned long)fl);
+            if (FAILED(hr) || (fl & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR))) break;
+            continue;
+        }
+        LONGLONG dur = -1, dts = -1;
+        s->GetSampleDuration(&dur);
+        UINT64 d64 = 0;
+        if (SUCCEEDED(s->GetUINT64(MFSampleExtension_DecodeTimestamp, &d64))) dts = (LONGLONG)d64;
+        UINT32 clean = 0, disc = 0;
+        s->GetUINT32(MFSampleExtension_CleanPoint, &clean);
+        s->GetUINT32(MFSampleExtension_Discontinuity, &disc);
+        DWORD nbuf = 0;
+        s->GetBufferCount(&nbuf);
+        printf("#%-3d t=%9.4f dur=%7.4f dts=%9.4f clean=%u disc=%u bufs=%lu", k, ts / 1e7, dur / 1e7,
+               dts >= 0 ? dts / 1e7 : -1.0, clean, disc, (unsigned long)nbuf);
+        IMFMediaBuffer* b = NULL;
+        if (SUCCEEDED(s->ConvertToContiguousBuffer(&b))) {
+            BYTE* p = NULL;
+            DWORD mx = 0, cur = 0;
+            if (SUCCEEDED(b->Lock(&p, &mx, &cur))) {
+                printf(" len=%lu:", (unsigned long)cur);
+                for (DWORD i = 0; i < cur && i < 12; i++) printf(" %02X", p[i]);
+                // list NAL unit types if this looks like Annex B
+                if (cur > 4 && p[0] == 0 && p[1] == 0 && (p[2] == 1 || (p[2] == 0 && p[3] == 1))) {
+                    printf("  NALs:");
+                    int shown = 0;
+                    for (DWORD i = 0; i + 3 < cur && shown < 12; i++) {
+                        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) { printf(" %u", p[i + 3] & 0x1f); shown++; i += 2; }
+                    }
+                }
+                b->Unlock();
+            }
+            b->Release();
+        }
+        printf("\n");
+        s->Release();
+    }
+    rd->Release();
+    return 0;
+}
+
 // ---------------------------------------------------------------- resolve
 // Create the media source through IMFSourceResolver directly and print the video
 // stream subtypes it exposes (our byte stream handler retags 4:2:2 H.264 as 'XAVC').
@@ -364,15 +663,34 @@ static void SaveBmp(const wchar_t* out, const BYTE* px, int w, int h) {
     CloseHandle(f);
 }
 
-static int CmdThumb(const wchar_t* path, const wchar_t* out) {
-    IShellItemImageFactory* f = NULL;
-    HRESULT hr = SHCreateItemFromParsingName(path, NULL, IID_PPV_ARGS(&f));
-    if (FAILED(hr)) { printf("SHCreateItemFromParsingName hr=0x%08lX\n", (unsigned long)hr); return 1; }
-    SIZE sz = { 256, 256 };
+// force: IThumbnailCache with WTS_FORCEEXTRACTION, i.e. extract again (through the thumbnail
+// host process, as Explorer does) and replace whatever the cache holds for the file.
+static int CmdThumb(const wchar_t* path, const wchar_t* out, bool force) {
+    HRESULT hr;
     HBITMAP hbm = NULL;
-    hr = f->GetImage(sz, SIIGBF_THUMBNAILONLY, &hbm);
-    f->Release();
-    printf("GetImage(THUMBNAILONLY) hr=0x%08lX\n", (unsigned long)hr);
+    if (force) {
+        IShellItem* item = NULL;
+        hr = SHCreateItemFromParsingName(path, NULL, IID_PPV_ARGS(&item));
+        if (FAILED(hr)) { printf("SHCreateItemFromParsingName hr=0x%08lX\n", (unsigned long)hr); return 1; }
+        IThumbnailCache* tc = NULL;
+        hr = CoCreateInstance(kClsidLocalThumbnailCache, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&tc));
+        if (FAILED(hr)) { printf("CoCreateInstance(LocalThumbnailCache) hr=0x%08lX\n", (unsigned long)hr); item->Release(); return 1; }
+        ISharedBitmap* sb = NULL;
+        WTS_CACHEFLAGS cf = WTS_DEFAULT;
+        hr = tc->GetThumbnail(item, 256, WTS_FORCEEXTRACTION, &sb, &cf, NULL);
+        printf("IThumbnailCache::GetThumbnail(FORCEEXTRACTION) hr=0x%08lX cacheflags=0x%X\n", (unsigned long)hr, (unsigned)cf);
+        if (sb) { sb->Detach(&hbm); sb->Release(); }
+        tc->Release();
+        item->Release();
+    } else {
+        IShellItemImageFactory* f = NULL;
+        hr = SHCreateItemFromParsingName(path, NULL, IID_PPV_ARGS(&f));
+        if (FAILED(hr)) { printf("SHCreateItemFromParsingName hr=0x%08lX\n", (unsigned long)hr); return 1; }
+        SIZE sz = { 256, 256 };
+        hr = f->GetImage(sz, SIIGBF_THUMBNAILONLY, &hbm);
+        f->Release();
+        printf("GetImage(THUMBNAILONLY) hr=0x%08lX\n", (unsigned long)hr);
+    }
     if (FAILED(hr) || !hbm) return 2;
     BITMAP bm;
     GetObject(hbm, sizeof(bm), &bm);
@@ -420,7 +738,8 @@ static int CmdOpen(const wchar_t* aumid, const wchar_t* path) {
 int wmain(int argc, wchar_t** argv) {
     printf("mftest pid=%lu\n", (unsigned long)GetCurrentProcessId());
     if (argc < 2) {
-        printf("usage: mftest enum [fourcc] | read <file> [rgb|d3d] | thumb <file> [out.bmp] | open <aumid> <file>\n");
+        printf("usage: mftest enum [fourcc] | read <file> [rgb|d3d] | decode <file> <fmt> [n] [bmp] | samples <file> [n]\n"
+               "       | resolve <file> | thumb <file> [bmp] | thumbforce <file> [bmp] | open <aumid> <file>\n");
         return 64;
     }
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
@@ -433,7 +752,13 @@ int wmain(int argc, wchar_t** argv) {
         rc = CmdRead(argv[2], !wcscmp(mode, L"rgb"), !wcscmp(mode, L"d3d"));
     }
     else if (!wcscmp(cmd, L"resolve") && argc >= 3) rc = CmdResolve(argv[2]);
-    else if (!wcscmp(cmd, L"thumb") && argc >= 3) rc = CmdThumb(argv[2], argc >= 4 ? argv[3] : NULL);
+    else if (!wcscmp(cmd, L"vpcaps")) rc = CmdVpCaps();
+    else if (!wcscmp(cmd, L"samples") && argc >= 3) rc = CmdSamples(argv[2], argc >= 4 ? _wtoi(argv[3]) : 12);
+    else if (!wcscmp(cmd, L"decode") && argc >= 4)
+        rc = CmdDecode(argv[2], argv[3], argc >= 5 ? _wtoi(argv[4]) : 100,
+                       argc >= 6 && wcscmp(argv[5], L"-") ? argv[5] : NULL, argc >= 7 ? _wtof(argv[6]) : 0.0);
+    else if (!wcscmp(cmd, L"thumb") && argc >= 3) rc = CmdThumb(argv[2], argc >= 4 ? argv[3] : NULL, false);
+    else if (!wcscmp(cmd, L"thumbforce") && argc >= 3) rc = CmdThumb(argv[2], argc >= 4 ? argv[3] : NULL, true);
     else if (!wcscmp(cmd, L"open") && argc >= 4) rc = CmdOpen(argv[2], argv[3]);
     else printf("bad arguments\n");
     MFShutdown();

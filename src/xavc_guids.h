@@ -27,6 +27,19 @@ DEFINE_GUID(CLSID_XavcByteStreamHandler,
 DEFINE_GUID(XAVC_IID_IMFByteStreamHandler,
     0xbb420aa4, 0x765b, 0x4a1f, 0x91, 0xfe, 0xd6, 0xa8, 0xa1, 0x43, 0x92, 0x4c);
 
+// {EC15E2E9-E36B-4F7C-8758-77D452EF4CE7} IID_IMFQualityAdvise and
+// {F3706F0D-8EA2-4886-8000-7155E9EC2EAE} IID_IMFQualityAdvise2 (missing from mingw-w64;
+// values checked against msmpeg2vdec.dll / mf.dll).
+DEFINE_GUID(XAVC_IID_IMFQualityAdvise,
+    0xec15e2e9, 0xe36b, 0x4f7c, 0x87, 0x58, 0x77, 0xd4, 0x52, 0xef, 0x4c, 0xe7);
+DEFINE_GUID(XAVC_IID_IMFQualityAdvise2,
+    0xf3706f0d, 0x8ea2, 0x4886, 0x80, 0x00, 0x71, 0x55, 0xe9, 0xec, 0x2e, 0xae);
+
+// {30D15206-ED2A-4760-BE17-EB4A9F12295C} MF_QUALITY_NOTIFY_SAMPLE_LAG: attribute of the
+// MEQualityNotify events the renderer sends (how late a sample was, 100-ns units).
+DEFINE_GUID(XAVC_MF_QUALITY_NOTIFY_SAMPLE_LAG,
+    0x30d15206, 0xed2a, 0x4760, 0xbe, 0x17, 0xeb, 0x4a, 0x9f, 0x12, 0x29, 0x5c);
+
 // {271C3902-6095-4C45-A22F-20091816EE9E}  system "MPEG4 Byte Stream Handler" (mfmp4srcsnk.dll)
 DEFINE_GUID(CLSID_SystemMpeg4ByteStreamHandler,
     0x271c3902, 0x6095, 0x4c45, 0xa2, 0x2f, 0x20, 0x09, 0x18, 0x16, 0xee, 0x9e);
@@ -39,6 +52,7 @@ XAVC_DEFINE_FOURCC_GUID(XAVC_VideoFormat_H264, 0x34363248) // 'H264'
 XAVC_DEFINE_FOURCC_GUID(XAVC_VideoFormat_NV12, 0x3231564e) // 'NV12'
 XAVC_DEFINE_FOURCC_GUID(XAVC_VideoFormat_P010, 0x30313050) // 'P010'
 XAVC_DEFINE_FOURCC_GUID(XAVC_VideoFormat_Y210, 0x30313259) // 'Y210'
+XAVC_DEFINE_FOURCC_GUID(XAVC_VideoFormat_YUY2, 0x32595559) // 'YUY2'
 // 'XAVC' - private subtype our byte stream handler gives to H.264 streams the in-box
 // decoder cannot decode (it would otherwise accept them at SetInputType and then fail).
 XAVC_DEFINE_FOURCC_GUID(XAVC_VideoFormat_XAVC, 0x43564158) // 'XAVC'

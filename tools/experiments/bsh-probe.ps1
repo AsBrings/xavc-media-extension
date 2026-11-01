@@ -27,6 +27,7 @@
 param(
     [switch]$Install,
     [switch]$Remove,
+    [int]$LogLevel = 1,
     [string]$Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 )
 $ErrorActionPreference = 'Stop'
@@ -81,6 +82,7 @@ if ($Remove) {
     Remove-UserConfig
     Unregister-Installed
     Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+    [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree('SOFTWARE\XavcDecoder', $false)
     Write-Host 'probe removed'
     exit 0
 }
@@ -96,6 +98,12 @@ foreach ($t in '7f9a3c21-5e44-4b0a-9c1d-2a6b8e3d4f10') {
 # 2. machine part: install + register (no merit)
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item (Join-Path $Repo 'build\out\xavc_decoder.dll') $dll -Force
+foreach ($d in 'avcodec-*.dll', 'avutil-*.dll', 'swresample-*.dll') {   # FFmpeg runtime (loaded on demand)
+    Copy-Item (Join-Path $Repo "build\out\$d") $dest -Force
+}
+$cfg = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SOFTWARE\XavcDecoder')
+$cfg.SetValue('LogLevel', $LogLevel, [Microsoft.Win32.RegistryValueKind]::DWord)
+$cfg.Close()
 $p = Start-Process regsvr32 -ArgumentList "/s `"$dll`"" -Wait -PassThru
 if ($p.ExitCode -ne 0) { throw "regsvr32 failed (exit $($p.ExitCode))" }
 Write-Host "registered $dll"

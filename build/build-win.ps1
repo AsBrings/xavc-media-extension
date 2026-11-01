@@ -52,13 +52,46 @@ function Invoke-Step([string]$name, [string[]]$argv) {
     if ($LASTEXITCODE -ne 0) { throw "$name failed (exit $LASTEXITCODE)" }
 }
 
-Invoke-Step '[1/4] compile guids.cpp'         ($flags + @('-c', "$src\guids.cpp", '-o', "$out\guids.o"))
-Invoke-Step '[2/4] compile xavc_diag_mft.cpp' ($flags + @('-c', "$src\xavc_diag_mft.cpp", '-o', "$out\mft.o"))
-Invoke-Step '[3/4] compile xavc_bsh.cpp'      ($flags + @('-c', "$src\xavc_bsh.cpp", '-o', "$out\bsh.o"))
-Invoke-Step '[4/4] link xavc_decoder.dll'     (@('-shared', '-o', "$out\xavc_decoder.dll",
-    "$out\guids.o", "$out\mft.o", "$out\bsh.o", "$src\xavc.def") + $searchDirs + @(
-    '-static-libgcc', '-static-libstdc++',
+if (-not $FFmpeg) { throw 'Pass -FFmpeg <FFmpeg shared build dir> (headers for the decoder, DLLs to ship).' }
+$ffInc = Join-Path $FFmpeg 'include'
+if (-not (Test-Path (Join-Path $ffInc 'libavcodec\avcodec.h'))) { throw "FFmpeg headers not found under $ffInc" }
+
+# The decoder loads avcodec/avutil at run time (LoadLibraryEx from its own directory), so
+# only the headers are needed here; the matching DLLs are copied next to it below.
+$units = @(
+    @{ src = 'guids.cpp';        obj = 'guids.o';   extra = @() },
+    @{ src = 'xavc_util.cpp';    obj = 'util.o';    extra = @() },
+    @{ src = 'xavc_h264.cpp';    obj = 'h264.o';    extra = @() },
+    @{ src = 'xavc_convert.cpp'; obj = 'convert.o'; extra = @('-O3') },
+    @{ src = 'xavc_ffmpeg.cpp';  obj = 'ffmpeg.o';  extra = @("-I$ffInc") },
+    @{ src = 'xavc_decoder.cpp'; obj = 'decoder.o'; extra = @("-I$ffInc") },
+    @{ src = 'xavc_bsh.cpp';     obj = 'bsh.o';     extra = @() },
+    @{ src = 'xavc_dll.cpp';     obj = 'dll.o';     extra = @("-I$ffInc") }
+)
+$objs = @()
+$n = $units.Count + 1
+$i = 0
+foreach ($u in $units) {
+    $i++
+    Invoke-Step "[$i/$n] compile $($u.src)" ($flags + $u.extra + @('-c', "$src\$($u.src)", '-o', "$out\$($u.obj)"))
+    $objs += "$out\$($u.obj)"
+}
+Invoke-Step "[$n/$n] link xavc_decoder.dll" (@('-shared', '-o', "$out\xavc_decoder.dll") + $objs +
+    @("$src\xavc.def") + $searchDirs + @('-static-libgcc', '-static-libstdc++',
     '-lmfplat', '-lmfuuid', '-lole32', '-loleaut32', '-luuid'))
+# Host processes only find system DLLs: refuse a build that imports MinGW runtime DLLs
+# (e.g. libwinpthread-1.dll, pulled in by thread_local / emutls).
+$objdump = Join-Path $MinGW 'bin\objdump.exe'
+if (Test-Path $objdump) {
+    $imports = & $objdump -p "$out\xavc_decoder.dll" | Select-String 'DLL Name: (.+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+    $bad = $imports | Where-Object { $_ -match '^(lib|av|sw)' }
+    if ($bad) { throw "xavc_decoder.dll must not import: $($bad -join ', ')" }
+    Write-Host "imports: $($imports -join ', ')"
+}
+# FFmpeg runtime the decoder loads (avcodec also imports swresample).
+foreach ($d in 'avcodec-*.dll', 'avutil-*.dll', 'swresample-*.dll') {
+    Copy-Item (Join-Path $FFmpeg "bin\$d") $out -Force
+}
 
 Write-Host "OK -> $out\xavc_decoder.dll"
 
@@ -67,14 +100,12 @@ Invoke-Step '[harness] mftest.exe' (@('-O2', '-municode', '-D_WIN32_WINNT=0x0A00
     '-Wall', '-Wno-misleading-indentation', '-o', "$out\mftest.exe", "$root\tools\mftest\mftest.cpp") +
     $searchDirs + @('-static-libgcc', '-static-libstdc++',
     '-lmfplat', '-lmfreadwrite', '-lmfuuid', '-lole32', '-loleaut32', '-luuid', '-lshell32', '-lgdi32', '-luser32',
-    '-ld3d11'))
+    '-ld3d11', '-ldxgi'))
 Write-Host "OK -> $out\mftest.exe"
 
-if ($FFmpeg) {
-    # libavcodec decode-core check; the FFmpeg DLLs are copied next to it.
-    Invoke-Step '[ffmpeg] avtest.exe' (@('-O2', '-x', 'c', "-I$FFmpeg\include", '-o', "$out\avtest.exe",
-        "$root\tools\avtest\avtest.c", '-x', 'none', "-L$FFmpeg\lib") + $searchDirs + @(
-        '-static-libgcc', '-static-libstdc++', '-lavformat', '-lavcodec', '-lavutil', '-lswscale'))
-    Copy-Item (Join-Path $FFmpeg 'bin\*.dll') $out -Force
-    Write-Host "OK -> $out\avtest.exe"
-}
+# Reference decoder for tests (libavformat demuxing + libavcodec), linked normally.
+Invoke-Step '[test] avtest.exe' (@('-O2', '-x', 'c', "-I$ffInc", '-o', "$out\avtest.exe",
+    "$root\tools\avtest\avtest.c", '-x', 'none', "-L$FFmpeg\lib") + $searchDirs + @(
+    '-static-libgcc', '-static-libstdc++', '-lavformat', '-lavcodec', '-lavutil', '-lswscale'))
+Copy-Item (Join-Path $FFmpeg 'bin\*.dll') $out -Force
+Write-Host "OK -> $out\avtest.exe"

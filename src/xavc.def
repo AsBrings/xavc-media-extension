@@ -1,7 +1,6 @@
-LIBRARY xavc_decoder
+LIBRARY xavc_decoder.dll
 EXPORTS
     DllGetClassObject   PRIVATE
     DllCanUnloadNow     PRIVATE
     DllRegisterServer   PRIVATE
     DllUnregisterServer PRIVATE
-    DllInstall          PRIVATE

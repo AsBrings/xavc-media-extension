@@ -14,6 +14,7 @@
 // only be matched by our decoder; everything else passes through untouched.
 
 #include "xavc_common.h"
+#include <new>
 
 namespace {
 
@@ -33,7 +34,7 @@ UINT32 PatchMediaTypeHandler(IMFMediaTypeHandler* mth) {
             if (XavcIsHigh422Profile(profile) &&
                 SUCCEEDED(mt->SetGUID(MF_MT_SUBTYPE, XAVC_VideoFormat_XAVC))) {
                 patched++;
-                XavcLog("BSH: stream type %lu H264 profile %d -> XAVC", (unsigned long)i, profile);
+                XavcLog("BSH: stream type %lu: H.264 profile %d -> XAVC", (unsigned long)i, profile);
             }
         }
         mt->Release();
@@ -73,8 +74,8 @@ void PatchSource(IMFMediaSource* src) {
     }
     pd->Release();
 
-    // Verify the change is visible through a fresh presentation descriptor.
-    if (patched && SUCCEEDED(src->CreatePresentationDescriptor(&pd)) && pd) {
+    // Trace: verify the change is visible through a fresh presentation descriptor.
+    if (patched && XavcGetSettings().logLevel >= 2 && SUCCEEDED(src->CreatePresentationDescriptor(&pd)) && pd) {
         for (DWORD i = 0; i < n; i++) {
             BOOL selected = FALSE;
             IMFStreamDescriptor* sd = NULL;
@@ -85,7 +86,7 @@ void PatchSource(IMFMediaSource* src) {
                 SUCCEEDED(mth->GetCurrentMediaType(&cur)) && cur) {
                 GUID sub = GUID_NULL;
                 cur->GetGUID(MF_MT_SUBTYPE, &sub);
-                XavcLog("BSH: verify stream %lu current subtype %08lx", (unsigned long)i, (unsigned long)sub.Data1);
+                XavcTrace("BSH: verify stream %lu current subtype %08lx", (unsigned long)i, (unsigned long)sub.Data1);
             }
             if (cur) cur->Release();
             if (mth) mth->Release();
@@ -93,7 +94,7 @@ void PatchSource(IMFMediaSource* src) {
         }
         pd->Release();
     }
-    XavcLog("BSH: patched %u media type(s)", patched);
+    XavcTrace("BSH: patched %u media type(s)", patched);
 }
 
 class CXavcByteStreamHandler : public IMFByteStreamHandler {
@@ -125,7 +126,7 @@ public:
                                    IUnknown** cancelCookie, IMFAsyncCallback* cb, IUnknown* state) {
         char u8[260] = "";
         if (url) WideCharToMultiByte(CP_UTF8, 0, url, -1, u8, sizeof(u8) - 1, NULL, NULL);
-        XavcLog("BSH: BeginCreateObject flags=0x%lx url=%s", (unsigned long)flags, u8);
+        XavcTrace("BSH: BeginCreateObject flags=0x%lx url=%s", (unsigned long)flags, u8);
         HRESULT hr = EnsureInner();
         if (FAILED(hr)) return hr;
         // The caller's callback is handed straight to the system handler; the caller then
@@ -136,7 +137,7 @@ public:
     STDMETHODIMP EndCreateObject(IMFAsyncResult* result, MF_OBJECT_TYPE* type, IUnknown** obj) {
         if (!m_inner) return E_UNEXPECTED;
         HRESULT hr = m_inner->EndCreateObject(result, type, obj);
-        XavcLog("BSH: EndCreateObject hr=0x%08lx type=%d", (unsigned long)hr, type ? (int)*type : -1);
+        XavcTrace("BSH: EndCreateObject hr=0x%08lx type=%d", (unsigned long)hr, type ? (int)*type : -1);
         if (SUCCEEDED(hr) && type && *type == MF_OBJECT_MEDIASOURCE && obj && *obj) {
             IMFMediaSource* src = NULL;
             if (SUCCEEDED((*obj)->QueryInterface(IID_IMFMediaSource, (void**)&src)) && src) {
@@ -173,7 +174,7 @@ private:
 } // namespace
 
 HRESULT XavcCreateByteStreamHandler(REFIID riid, void** ppv) {
-    CXavcByteStreamHandler* h = new CXavcByteStreamHandler();
+    CXavcByteStreamHandler* h = new (std::nothrow) CXavcByteStreamHandler();
     if (!h) return E_OUTOFMEMORY;
     HRESULT hr = h->QueryInterface(riid, ppv);
     h->Release();
