@@ -27,8 +27,13 @@ Windows 把 H.264 写死交给自带解码器，而它不支持 4:2:2 / 10bit。
 
 ## 安装 / 卸载
 
-从发布包运行 `install.cmd`（会请求一次管理员权限），卸载运行 `uninstall.cmd`，
-或在「设置 → 应用」中卸载。详见 [`installer/README.txt`](installer/README.txt)。
+从 [Releases](https://github.com/AsBrings/xavc-media-extension/releases) 下载 `XavcDecoder-<版本>-setup.exe`，
+运行后按向导操作（会请求一次管理员权限）。安装程序没有代码签名，Windows SmartScreen 可能提示
+"Windows 已保护你的电脑"，点「更多信息 → 仍要运行」即可。
+
+卸载：设置 → 应用 → 已安装的应用 → XAVC S / S-I Decoder。
+
+开发者也可以用 `installer/install.cmd` / `uninstall.cmd` 脚本安装（见 [`installer/README.txt`](installer/README.txt)）。
 
 ## 构建
 
@@ -38,7 +43,7 @@ shared 构建（例如 BtbN 的 `ffmpeg-master-latest-win64-lgpl-shared`），�
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build\build-win.ps1 -MinGW <mingw64> -FFmpeg <ffmin-xavc> [-FFmpegRef <完整 FFmpeg>]
-powershell -ExecutionPolicy Bypass -File build\package.ps1 -FFmpeg <ffmin-xavc>
+powershell -ExecutionPolicy Bypass -File build\package.ps1 -FFmpeg <ffmin-xavc>   # 装有 Inno Setup 6 时同时生成 setup.exe
 powershell -ExecutionPolicy Bypass -File tools\regress.ps1 -SI <S-I 素材> -LongGop <S 素材>
 ```
 

@@ -9,7 +9,8 @@
 
 param(
     [string]$FFmpeg = $env:XAVC_FFMPEG,
-    [string]$Version = '0.1.0'
+    [string]$Version = '0.1.0',
+    [string]$Iscc = ''          # Inno Setup compiler; found automatically when installed
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
@@ -47,6 +48,20 @@ foreach ($l in $lic) {
 }
 if (-not $found) { throw "no FFmpeg licence file in $FFmpeg" }
 Copy-Item (Join-Path $PSScriptRoot 'ffmpeg-minimal.sh') (Join-Path $pkg 'licenses\ffmpeg-minimal.sh')
+
+# Guided installer (Inno Setup 6.5+): build\package\XavcDecoder-<ver>-setup.exe
+if (-not $Iscc) {
+    $Iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+              "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if ($Iscc) {
+    & $Iscc /Q "/DAppVersion=$Version" "/DPkgDir=$pkg" (Join-Path $root 'installer\XavcDecoder.iss')
+    if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
+    $setup = Join-Path $PSScriptRoot "package\XavcDecoder-$Version-setup.exe"
+    Write-Host ("setup:   {0} ({1} MB)" -f $setup, [Math]::Round((Get-Item $setup).Length / 1MB, 1))
+} else {
+    Write-Host 'Inno Setup 6 not found: no setup.exe (install it, or pass -Iscc <path to ISCC.exe>)'
+}
 
 $zip = "$pkg.zip"
 Remove-Item $zip -ErrorAction SilentlyContinue

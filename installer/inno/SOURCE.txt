@@ -1,0 +1,3 @@
+; Simplified Chinese messages for Inno Setup 6.5+ (community translation from
+; https://github.com/jrsoftware/issrc/blob/is-6_7_3/Files/Languages/Unofficial/ChineseSimplified.isl,
+; UTF-8 BOM added so the compiler reads it as UTF-8).
