@@ -169,7 +169,7 @@ public:
           m_dropMode(MF_DROP_MODE_NONE), m_quality(MF_QUALITY_NORMAL), m_dropUntil(AV_NOPTS_VALUE),
           m_droppedOut(0), m_autoLevel(0), m_lateRun(0), m_onTimeRun(0), m_levelChangedAt(0), m_lagEvents(0), m_eventDumps(0),
           m_catchUpUntil(AV_NOPTS_VALUE), m_catchUpEndedAt(0), m_lastDownAt(0), m_downHoldMs(10000),
-          m_skippedIn(0) {
+          m_warmupUntil(0), m_badFrames(0), m_skippedIn(0) {
         InitializeCriticalSection(&m_cs);
         memset(&m_info, 0, sizeof(m_info));
         memset(m_offer, 0, sizeof(m_offer));
@@ -670,8 +670,8 @@ private:
         const ULONGLONG now = GetTickCount64();
         if (++m_lagEvents % 60 == 1)
             XavcTrace("quality: lag %.1f ms (auto level %d)", lag / 1e4, m_autoLevel);
-        if (m_catchUpUntil != AV_NOPTS_VALUE || now - m_catchUpEndedAt < 1500)
-            return;                                   // reports about frames from before the jump
+        if (m_catchUpUntil != AV_NOPTS_VALUE || now - m_catchUpEndedAt < 1500 || now < m_warmupUntil)
+            return;                                   // frames from before a jump, or the pipeline filling up
         if (lag > kLate) { m_lateRun++; m_onTimeRun = 0; }
         else if (lag < kOnTime) { m_onTimeRun++; m_lateRun = 0; }
         bool changed = false;
@@ -760,6 +760,10 @@ private:
             return MF_E_INVALIDMEDIATYPE;
         }
         info->profile = profile;
+        if (haveSps && sps.chroma_format_idc == 3 && sps.matrix_coefficients == 0) {
+            XavcLog("SetInputType: 4:4:4 coded as GBR is not supported");
+            return MF_E_INVALIDMEDIATYPE;
+        }
 
         UINT32 mw = 0, mh = 0;
         MFGetAttributeSize(t, MF_MT_FRAME_SIZE, &mw, &mh);
@@ -925,6 +929,7 @@ private:
         c->thread_type = lowLatency ? FF_THREAD_SLICE : (FF_THREAD_FRAME | FF_THREAD_SLICE);
         c->opaque = this;
         c->get_format = GetFormat;
+        c->flags |= AV_CODEC_FLAG_UNALIGNED;               // exact cropping; the converter needs no alignment
 
         // GPU: only NVDEC can decode H.264 4:2:2 (NVIDIA Blackwell and newer). Creating the
         // CUDA device fails quickly where there is no NVIDIA driver.
@@ -982,6 +987,7 @@ private:
         m_dropUntil = AV_NOPTS_VALUE;
         m_catchUpUntil = AV_NOPTS_VALUE;
         m_lateRun = m_onTimeRun = 0;
+        m_warmupUntil = GetTickCount64() + 2000;
         ApplyQuality();
     }
 
@@ -1034,6 +1040,12 @@ private:
             m_ff->frame_unref(m_swFrame);
             int r = m_ff->hwframe_transfer_data(m_swFrame, f, 0);
             if (r < 0) { LogError("GPU frame download", r); DropFrame(); return S_FALSE; }
+            // libavcodec can only crop right/bottom of GPU surfaces; do top/left on the copy.
+            if (f->crop_left || f->crop_top) {
+                m_swFrame->crop_left = f->crop_left;
+                m_swFrame->crop_top = f->crop_top;
+                m_ff->frame_apply_cropping(m_swFrame, AV_FRAME_CROP_UNALIGNED);
+            }
             src = m_swFrame;
         }
         XavcSrcPlanes sp;
@@ -1042,8 +1054,10 @@ private:
                 XavcLog("cannot convert frame format %s %dx%d", m_ff->get_pix_fmt_name((enum AVPixelFormat)src->format),
                         src->width, src->height);
             DropFrame();
-            return S_FALSE;
+            // A stream we can never convert must fail visibly instead of playing black forever.
+            return ++m_badFrames >= 30 ? E_FAIL : S_FALSE;
         }
+        sp.interlaced = (f->flags & AV_FRAME_FLAG_INTERLACED) ? 1 : 0;
 
         IMFSample* out = ob.pSample;
         IMFSample* created = NULL;
@@ -1070,19 +1084,32 @@ private:
             return hr;
         }
 
-        // Lock: 2-D buffers tell us their pitch, plain buffers use the negotiated stride.
+        // Lock. 2-D buffers report their own pitch (Media Foundation pads it, e.g. to a multiple of
+        // 64 bytes) and, through IMF2DBuffer2, the real size of the allocation; plain buffers use
+        // the negotiated stride. Rows are 'pitch' apart; the last one needs only minStride bytes.
         IMF2DBuffer* b2 = NULL;
+        IMF2DBuffer2* b22 = NULL;
         BYTE* base = NULL;
         LONG pitch = 0;
         DWORD capacity = 0;
         const UINT32 rows = (m_outFmt == XOF_NV12 || m_outFmt == XOF_P010) ? m_info.h + m_info.h / 2 : m_info.h;
         UINT32 minStride = 0, minSize = 0;
         XavcFrameLayout(m_outFmt, m_info.w, m_info.h, &minStride, &minSize);
-        if (SUCCEEDED(mb->QueryInterface(IID_IMF2DBuffer, (void**)&b2))) {
+        if (SUCCEEDED(mb->QueryInterface(IID_IMF2DBuffer2, (void**)&b22))) {
+            b2 = b22;                                        // IMF2DBuffer2 derives from IMF2DBuffer
+            BYTE* start = NULL;
+            DWORD len = 0;
+            hr = b22->Lock2DSize(MF2DBuffer_LockFlags_Write, &base, &pitch, &start, &len);
+            if (SUCCEEDED(hr) && (pitch < (LONG)minStride || base < start ||
+                                  (UINT64)(base - start) + (UINT64)pitch * (rows - 1) + minStride > len)) {
+                b22->Unlock2D();
+                hr = MF_E_BUFFERTOOSMALL;
+            }
+        } else if (SUCCEEDED(mb->QueryInterface(IID_IMF2DBuffer, (void**)&b2))) {
             hr = b2->Lock2D(&base, &pitch);
-            DWORD contiguous = 0;
-            if (SUCCEEDED(hr) && SUCCEEDED(b2->GetContiguousLength(&contiguous))) capacity = contiguous;
-            if (SUCCEEDED(hr) && (pitch < (LONG)minStride || (capacity && (UINT64)pitch * rows > capacity))) {
+            DWORD maxLen = 0;
+            if (SUCCEEDED(hr) && (pitch < (LONG)minStride || FAILED(mb->GetMaxLength(&maxLen)) ||
+                                  (UINT64)pitch * (rows - 1) + minStride > maxLen)) {
                 b2->Unlock2D();
                 hr = MF_E_BUFFERTOOSMALL;
             }
@@ -1090,7 +1117,7 @@ private:
             DWORD cur = 0;
             hr = mb->Lock(&base, &capacity, &cur);
             pitch = (LONG)m_outStride;
-            if (SUCCEEDED(hr) && (UINT64)pitch * rows > capacity) {
+            if (SUCCEEDED(hr) && (UINT64)pitch * (rows - 1) + minStride > capacity) {
                 mb->Unlock();
                 hr = MF_E_BUFFERTOOSMALL;
             }
@@ -1109,19 +1136,32 @@ private:
         dp.p1 = base + (ptrdiff_t)pitch * m_info.h;
         LARGE_INTEGER t0, t1;
         QueryPerformanceCounter(&t0);
-        m_conv.Run(sp, m_outFmt, dp, (int)m_info.w, (int)m_info.h);
+        const bool converted = m_conv.Run(sp, m_outFmt, dp, (int)m_info.w, (int)m_info.h);
         QueryPerformanceCounter(&t1);
         m_convTicks += t1.QuadPart - t0.QuadPart;
 
-        const DWORD used = (DWORD)((UINT64)pitch * rows);
+        // Current length: the contiguous image size for 2-D buffers (what Lock() would return),
+        // the stride-based layout for plain buffers.
+        DWORD used = minSize;
         if (b2) {
+            DWORD contiguous = 0;
+            if (SUCCEEDED(b2->GetContiguousLength(&contiguous)) && contiguous) used = contiguous;
             b2->Unlock2D();
             b2->Release();
         } else {
+            UINT64 full = (UINT64)pitch * rows;
+            used = (DWORD)(full < capacity ? full : capacity);
             mb->Unlock();
         }
-        mb->SetCurrentLength(used);
+        if (converted) mb->SetCurrentLength(used);
         mb->Release();
+        if (!converted) {                                    // out of memory: never deliver a partial picture
+            XavcLog("frame conversion failed (out of memory?)");
+            if (created) created->Release();
+            DropFrame();
+            return E_OUTOFMEMORY;
+        }
+        m_badFrames = 0;
 
         LONGLONG pts = f->pts;
         if (pts == AV_NOPTS_VALUE) pts = f->best_effort_timestamp;
@@ -1142,6 +1182,7 @@ private:
         if (created) ob.pSample = created;                   // ownership passes to the caller
 
         if (m_frames++ == 0) {
+            m_warmupUntil = GetTickCount64() + 2000;
             XavcLog("first frame: %s %dx%d (%s) -> %s, t=%.3fs%s", m_ff->get_pix_fmt_name((enum AVPixelFormat)src->format),
                     src->width, src->height, f->hw_frames_ctx ? "decoded on the GPU" : "decoded on the CPU",
                     FmtName(m_outFmt), pts / 1e7, b2 ? ", 2-D output buffer" : "");
@@ -1216,6 +1257,8 @@ private:
     ULONGLONG m_catchUpEndedAt;
     ULONGLONG m_lastDownAt;
     ULONGLONG m_downHoldMs;
+    ULONGLONG m_warmupUntil;
+    ULONG m_badFrames;
     UINT64 m_skippedIn;
     XavcConverter m_conv;
 };

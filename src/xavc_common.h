@@ -54,6 +54,8 @@ extern volatile LONG g_cObj;       // live COM objects (DllCanUnloadNow)
 
 HRESULT XavcCreateByteStreamHandler(REFIID riid, void** ppv);   // xavc_bsh.cpp
 HRESULT XavcCreateDecoder(REFIID riid, void** ppv);             // xavc_decoder.cpp
+HRESULT XavcRegisterUser();                                     // xavc_userreg.cpp
+HRESULT XavcUnregisterUser();
 
 // ---- Settings (xavc_util.cpp) ----
 // REG_DWORD values under HKCU\Software\XavcDecoder, then HKLM\SOFTWARE\XavcDecoder; read once

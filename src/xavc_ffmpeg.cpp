@@ -57,14 +57,22 @@ BOOL CALLBACK LoadOnce(PINIT_ONCE, PVOID, PVOID*) {
     if (!slash) return TRUE;
     *slash = 0;
 
-    HMODULE u = LoadFromOurDir(dir, L"avutil-" XAVC_WSTR(LIBAVUTIL_VERSION_MAJOR) L".dll");
-    HMODULE c = u ? LoadFromOurDir(dir, L"avcodec-" XAVC_WSTR(LIBAVCODEC_VERSION_MAJOR) L".dll") : NULL;
+    // Our minimal FFmpeg build (build/ffmpeg-minimal.sh) uses --build-suffix=-xavc, so its DLLs
+    // cannot be confused with another FFmpeg the host process may have loaded.
+#if XAVC_FFMPEG_SUFFIXED
+#define XAVC_FF_SFX L"-xavc"
+#else
+#define XAVC_FF_SFX L""
+#endif
+    HMODULE u = LoadFromOurDir(dir, L"avutil" XAVC_FF_SFX L"-" XAVC_WSTR(LIBAVUTIL_VERSION_MAJOR) L".dll");
+    HMODULE c = u ? LoadFromOurDir(dir, L"avcodec" XAVC_FF_SFX L"-" XAVC_WSTR(LIBAVCODEC_VERSION_MAJOR) L".dll") : NULL;
     if (!u || !c) return TRUE;
 
     bool ok = true;
     ok &= Resolve(u, "av_frame_alloc", &g_ff.frame_alloc);
     ok &= Resolve(u, "av_frame_free", &g_ff.frame_free);
     ok &= Resolve(u, "av_frame_unref", &g_ff.frame_unref);
+    ok &= Resolve(u, "av_frame_apply_cropping", &g_ff.frame_apply_cropping);
     ok &= Resolve(u, "av_mallocz", &g_ff.mallocz);
     ok &= Resolve(u, "av_log_set_callback", &g_ff.log_set_callback);
     ok &= Resolve(u, "av_log_set_level", &g_ff.log_set_level);

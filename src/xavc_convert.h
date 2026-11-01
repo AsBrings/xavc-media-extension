@@ -26,6 +26,7 @@ struct XavcSrcPlanes {
     int semi;                 // U and V interleaved in data[1]
     int vu;                   // ... with V first (NV21-style)
     int gray;                 // no chroma at all (4:0:0): neutral chroma is written
+    int interlaced;           // field-interleaved frame: chroma is only combined within a field
 };
 
 struct XavcDstPlanes {
@@ -39,7 +40,8 @@ public:
     XavcConverter();
     ~XavcConverter();
     // Converts the top-left width x height region (both even, within the source picture).
-    void Run(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d, int width, int height);
+    // False if nothing was converted (bad arguments or out of memory).
+    bool Run(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d, int width, int height);
 
 private:
     static void CALLBACK WorkCallback(PTP_CALLBACK_INSTANCE, PVOID ctx, PTP_WORK);
@@ -53,6 +55,9 @@ private:
     XavcOutFmt m_fmt;
     int m_w, m_h, m_bandRows, m_bands;
     volatile LONG m_next;
+    void* m_scratch;          // m_workers slots of scratch rows for width m_scratchW
+    int m_scratchW;
+    volatile LONG m_slotNext;
 };
 
 // Bytes per row of plane 0 (default stride) and the whole buffer, for a width x height picture.

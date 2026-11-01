@@ -159,16 +159,22 @@ public:
     }
 
 private:
+    // Thread-safe: a caller may use one handler object from several threads.
     HRESULT EnsureInner() {
         if (m_inner) return S_OK;
+        IMFByteStreamHandler* h = NULL;
         HRESULT hr = CoCreateInstance(CLSID_SystemMpeg4ByteStreamHandler, NULL, CLSCTX_INPROC_SERVER,
-                                      XAVC_IID_IMFByteStreamHandler, (void**)&m_inner);
-        if (FAILED(hr)) XavcLog("BSH: cannot create system MPEG-4 handler hr=0x%08lx", (unsigned long)hr);
-        return hr;
+                                      XAVC_IID_IMFByteStreamHandler, (void**)&h);
+        if (FAILED(hr)) {
+            XavcLog("BSH: cannot create system MPEG-4 handler hr=0x%08lx", (unsigned long)hr);
+            return hr;
+        }
+        if (InterlockedCompareExchangePointer((PVOID volatile*)&m_inner, h, NULL) != NULL) h->Release();
+        return S_OK;
     }
 
     LONG m_cRef;
-    IMFByteStreamHandler* m_inner;
+    IMFByteStreamHandler* volatile m_inner;
 };
 
 } // namespace

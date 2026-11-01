@@ -12,8 +12,11 @@
 
 param(
     [string]$MinGW = $env:XAVC_MINGW,
-    # Optional: an FFmpeg "shared" dev build (include\, lib\, bin\) to also build tools\avtest.
-    [string]$FFmpeg = $env:XAVC_FFMPEG
+    # FFmpeg "shared" build the decoder is compiled against and ships with (include\, bin\).
+    # Releases use the minimal build from build\ffmpeg-minimal.sh (avcodec-xavc-NN.dll).
+    [string]$FFmpeg = $env:XAVC_FFMPEG,
+    # Optional full FFmpeg shared build (with libavformat) for the reference decoder tools\avtest.
+    [string]$FFmpegRef = $env:XAVC_FFMPEG_REF
 )
 $ErrorActionPreference = 'Stop'
 
@@ -45,6 +48,10 @@ $env:TEMP = $tmp
 
 $flags = @('-O2', '-fno-exceptions', '-fno-rtti', '-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00',
            '-Wall', '-Wno-misleading-indentation')
+# Our own FFmpeg build names its DLLs avcodec-xavc-NN.dll (--build-suffix=-xavc).
+if ($FFmpeg -and (Get-ChildItem (Join-Path $FFmpeg 'bin\avcodec-xavc-*.dll') -ErrorAction SilentlyContinue)) {
+    $flags += '-DXAVC_FFMPEG_SUFFIXED=1'
+}
 
 function Invoke-Step([string]$name, [string[]]$argv) {
     Write-Host $name
@@ -66,6 +73,7 @@ $units = @(
     @{ src = 'xavc_ffmpeg.cpp';  obj = 'ffmpeg.o';  extra = @("-I$ffInc") },
     @{ src = 'xavc_decoder.cpp'; obj = 'decoder.o'; extra = @("-I$ffInc") },
     @{ src = 'xavc_bsh.cpp';     obj = 'bsh.o';     extra = @() },
+    @{ src = 'xavc_userreg.cpp'; obj = 'userreg.o'; extra = @() },
     @{ src = 'xavc_dll.cpp';     obj = 'dll.o';     extra = @("-I$ffInc") }
 )
 $objs = @()
@@ -88,9 +96,10 @@ if (Test-Path $objdump) {
     if ($bad) { throw "xavc_decoder.dll must not import: $($bad -join ', ')" }
     Write-Host "imports: $($imports -join ', ')"
 }
-# FFmpeg runtime the decoder loads (avcodec also imports swresample).
-foreach ($d in 'avcodec-*.dll', 'avutil-*.dll', 'swresample-*.dll') {
-    Copy-Item (Join-Path $FFmpeg "bin\$d") $out -Force
+# FFmpeg runtime the decoder loads (a full build's avcodec also imports swresample).
+Get-ChildItem $out -Filter '*.dll' | Where-Object { $_.Name -match '^(avcodec|avutil|swresample)' } | Remove-Item -Force
+foreach ($d in 'avcodec*.dll', 'avutil*.dll', 'swresample*.dll') {
+    Get-ChildItem (Join-Path $FFmpeg "bin\$d") -ErrorAction SilentlyContinue | Copy-Item -Destination $out -Force
 }
 
 Write-Host "OK -> $out\xavc_decoder.dll"
@@ -103,9 +112,14 @@ Invoke-Step '[harness] mftest.exe' (@('-O2', '-municode', '-D_WIN32_WINNT=0x0A00
     '-ld3d11', '-ldxgi'))
 Write-Host "OK -> $out\mftest.exe"
 
-# Reference decoder for tests (libavformat demuxing + libavcodec), linked normally.
-Invoke-Step '[test] avtest.exe' (@('-O2', '-x', 'c', "-I$ffInc", '-o', "$out\avtest.exe",
-    "$root\tools\avtest\avtest.c", '-x', 'none', "-L$FFmpeg\lib") + $searchDirs + @(
-    '-static-libgcc', '-static-libstdc++', '-lavformat', '-lavcodec', '-lavutil', '-lswscale'))
-Copy-Item (Join-Path $FFmpeg 'bin\*.dll') $out -Force
-Write-Host "OK -> $out\avtest.exe"
+# Reference decoder for tests (libavformat demuxing + libavcodec), linked normally. It gets its
+# own folder because it needs the full FFmpeg DLLs.
+if ($FFmpegRef) {
+    $ref = Join-Path $out 'ref'
+    New-Item -ItemType Directory -Force -Path $ref | Out-Null
+    Invoke-Step '[test] avtest.exe' (@('-O2', '-x', 'c', "-I$FFmpegRef\include", '-o', "$ref\avtest.exe",
+        "$root\tools\avtest\avtest.c", '-x', 'none', "-L$FFmpegRef\lib") + $searchDirs + @(
+        '-static-libgcc', '-static-libstdc++', '-lavformat', '-lavcodec', '-lavutil', '-lswscale'))
+    Copy-Item (Join-Path $FFmpegRef 'bin\*.dll') $ref -Force
+    Write-Host "OK -> $ref\avtest.exe"
+}

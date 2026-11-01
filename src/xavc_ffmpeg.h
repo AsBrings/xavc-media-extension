@@ -22,6 +22,7 @@ struct XavcFF {
     decltype(&::av_frame_alloc)          frame_alloc;
     decltype(&::av_frame_free)           frame_free;
     decltype(&::av_frame_unref)          frame_unref;
+    decltype(&::av_frame_apply_cropping) frame_apply_cropping;
     decltype(&::av_mallocz)              mallocz;
     decltype(&::av_log_set_callback)     log_set_callback;
     decltype(&::av_log_set_level)        log_set_level;

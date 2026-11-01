@@ -1,0 +1,18 @@
+Third-party software in this package
+====================================
+
+FFmpeg (libavcodec, libavutil)
+  Files:   bin\avcodec-xavc-*.dll, bin\avutil-xavc-*.dll
+  Licence: GNU Lesser General Public License, version 2.1 or later
+           (licenses\FFmpeg-COPYING.LGPLv2.1.txt, licenses\FFmpeg-LICENSE.md)
+  Source:  https://github.com/FFmpeg/FFmpeg, commit listed in licenses\FFmpeg-source-commit.txt
+           (also https://ffmpeg.org/download.html)
+  Build:   licenses\ffmpeg-minimal.sh is the exact build script: unmodified FFmpeg source, only the
+           H.264 decoder and the NVDEC hwaccel enabled, no external libraries, DLL names suffixed
+           "-xavc". The NVDEC support uses the MIT-licensed headers from
+           https://github.com/FFmpeg/nv-codec-headers (no NVIDIA code is shipped; the driver's
+           nvcuda.dll / nvcuvid.dll are loaded at run time if present).
+
+  xavc_decoder.dll loads these DLLs at run time; you may replace them with your own build of the
+  same FFmpeg major versions (avcodec 63, avutil 61) made with the script above.
+  FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.

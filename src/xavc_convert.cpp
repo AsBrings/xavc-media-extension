@@ -36,18 +36,15 @@ void AveragePairs(const uint16_t* __restrict src, uint16_t* __restrict dst, int 
     for (int i = 0; i < n; i++) dst[i] = (uint16_t)(((uint32_t)src[2 * i] + src[2 * i + 1] + 1) >> 1);
 }
 
+// Scratch rows for one worker (a slice of XavcConverter's preallocated memory).
+const size_t kRowsPerSlot = 7;
+inline size_t RowLen(int w) { return ((size_t)w + 16) & ~(size_t)15; }   // in uint16_t
+
 struct Rows {
     uint16_t *Y, *U, *V, *U2, *V2, *T, *T2;
-    void* mem;
-    bool Alloc(int w) {
-        size_t lw = ((size_t)w + 16) & ~(size_t)15;
-        mem = malloc(lw * 2 * 7);
-        if (!mem) return false;
-        uint16_t* p = (uint16_t*)mem;
+    Rows(uint16_t* p, size_t lw) {
         Y = p; U = p + lw; V = p + 2 * lw; U2 = p + 3 * lw; V2 = p + 4 * lw; T = p + 5 * lw; T2 = p + 6 * lw;
-        return true;
     }
-    ~Rows() { free(mem); }
 };
 
 void LoadLuma(const XavcSrcPlanes& s, int y, uint16_t* Y, int w) {
@@ -125,10 +122,34 @@ void PackY210(const uint16_t* __restrict Y, const uint16_t* __restrict U, const 
     }
 }
 
+// Source chroma row(s) for output 4:2:0 chroma row j. In an interlaced frame the rows
+// alternate between the two fields, so only rows of the same field may be combined.
+inline void ChromaRowsFor420(const XavcSrcPlanes& s, int j, int srcRows, int* r0, int* r1) {
+    if (s.log2_ch) {                                   // already 4:2:0 (same field layout)
+        *r0 = *r1 = j < srcRows ? j : srcRows - 1;
+        return;
+    }
+    if (s.interlaced) {                                // field p = j & 1: rows 4k+p and 4k+2+p
+        *r0 = 2 * j - (j & 1);
+        *r1 = *r0 + 2;
+    } else {
+        *r0 = 2 * j;
+        *r1 = 2 * j + 1;
+    }
+    if (*r0 >= srcRows) *r0 = srcRows - 1;
+    if (*r1 >= srcRows) *r1 = *r0;
+}
+
+// Source chroma row for output (4:2:2) row y.
+inline int ChromaRowFor422(const XavcSrcPlanes& s, int y, int srcRows) {
+    int sr = y;
+    if (s.log2_ch) sr = s.interlaced ? (((y >> 2) << 1) | (y & 1)) : (y >> 1);
+    while (sr >= srcRows && sr >= 2) sr -= 2;          // keep the field parity when clamping
+    return sr < srcRows ? sr : srcRows - 1;
+}
+
 // Rows [y0, y1) of the output; y0 and y1 even.
-void ConvertRows(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d, int w, int y0, int y1) {
-    Rows r;
-    if (!r.Alloc(w)) return;
+void ConvertRows(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d, int w, int y0, int y1, Rows& r) {
     const int cw = w / 2;
     const int srcChromaRows = (s.height + (1 << s.log2_ch) - 1) >> s.log2_ch;
     switch (fmt) {
@@ -141,11 +162,11 @@ void ConvertRows(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d,
                 if (fmt == XOF_NV12) PackLuma8(r.Y, dl, w); else PackLuma10(r.Y, (uint16_t*)dl, w);
             }
             const int j = y / 2;
-            if (s.log2_ch || s.gray) {
-                LoadChroma(s, j < srcChromaRows ? j : srcChromaRows - 1, r.U, r.V, cw, r);
-            } else {                                     // 4:2:2 / 4:4:4 -> 4:2:0: average two rows
-                LoadChroma(s, 2 * j, r.U, r.V, cw, r);
-                LoadChroma(s, 2 * j + 1 < srcChromaRows ? 2 * j + 1 : 2 * j, r.U2, r.V2, cw, r);
+            int r0 = 0, r1 = 0;
+            ChromaRowsFor420(s, j, srcChromaRows, &r0, &r1);
+            LoadChroma(s, r0, r.U, r.V, cw, r);
+            if (r1 != r0) {                              // 4:2:2 / 4:4:4 -> 4:2:0: average two rows
+                LoadChroma(s, r1, r.U2, r.V2, cw, r);
                 Average(r.U, r.U2, cw);
                 Average(r.V, r.V2, cw);
             }
@@ -157,8 +178,7 @@ void ConvertRows(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d,
     case XOF_Y210:
         for (int y = y0; y < y1; y++) {
             LoadLuma(s, y, r.Y, w);
-            int sr = y >> s.log2_ch;
-            LoadChroma(s, sr < srcChromaRows ? sr : srcChromaRows - 1, r.U, r.V, cw, r);
+            LoadChroma(s, ChromaRowFor422(s, y, srcChromaRows), r.U, r.V, cw, r);
             uint8_t* dl = d.p0 + (ptrdiff_t)y * d.pitch;
             if (fmt == XOF_YUY2) PackYUY2(r.Y, r.U, r.V, dl, cw); else PackY210(r.Y, r.U, r.V, (uint16_t*)dl, cw);
         }
@@ -182,7 +202,7 @@ void XavcFrameLayout(XavcOutFmt f, UINT32 w, UINT32 h, UINT32* stride, UINT32* s
 
 XavcConverter::XavcConverter()
     : m_work(NULL), m_workers(1), m_s(NULL), m_d(NULL), m_fmt(XOF_NONE),
-      m_w(0), m_h(0), m_bandRows(0), m_bands(0), m_next(0) {
+      m_w(0), m_h(0), m_bandRows(0), m_bands(0), m_next(0), m_scratch(NULL), m_scratchW(0), m_slotNext(0) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     m_workers = (int)si.dwNumberOfProcessors;
@@ -196,6 +216,7 @@ XavcConverter::~XavcConverter() {
         WaitForThreadpoolWorkCallbacks(m_work, FALSE);
         CloseThreadpoolWork(m_work);
     }
+    free(m_scratch);
 }
 
 void CALLBACK XavcConverter::WorkCallback(PTP_CALLBACK_INSTANCE, PVOID ctx, PTP_WORK) {
@@ -203,21 +224,33 @@ void CALLBACK XavcConverter::WorkCallback(PTP_CALLBACK_INSTANCE, PVOID ctx, PTP_
 }
 
 void XavcConverter::DoBands() {
+    // Each participating thread (at most m_workers) takes its own scratch slot.
+    const LONG slot = InterlockedIncrement(&m_slotNext) - 1;
+    const size_t lw = RowLen(m_scratchW);
+    Rows rows((uint16_t*)m_scratch + (size_t)slot * kRowsPerSlot * lw, lw);
     for (;;) {
         LONG b = InterlockedIncrement(&m_next) - 1;
         if (b >= m_bands) return;
         int y0 = (int)b * m_bandRows;
         int y1 = y0 + m_bandRows;
         if (y1 > m_h) y1 = m_h;
-        ConvertRows(*m_s, m_fmt, *m_d, m_w, y0, y1);
+        ConvertRows(*m_s, m_fmt, *m_d, m_w, y0, y1, rows);
     }
 }
 
-void XavcConverter::Run(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d, int width, int height) {
+bool XavcConverter::Run(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPlanes& d, int width, int height) {
     width &= ~1;
     height &= ~1;
-    if (width <= 0 || height <= 0 || width > s.width || height > s.height) return;
+    if (width <= 0 || height <= 0 || width > s.width || height > s.height) return false;
+    if (!m_scratch || m_scratchW < width) {            // scratch rows for every worker, kept between frames
+        void* p = malloc((size_t)m_workers * kRowsPerSlot * RowLen(width) * sizeof(uint16_t));
+        if (!p) return false;
+        free(m_scratch);
+        m_scratch = p;
+        m_scratchW = width;
+    }
     m_s = &s; m_d = &d; m_fmt = fmt; m_w = width; m_h = height;
+    m_slotNext = 0;
     int bands = m_work ? m_workers * 3 : 1;
     int rows = (height + bands - 1) / bands;
     rows = (rows + 1) & ~1;
@@ -229,4 +262,5 @@ void XavcConverter::Run(const XavcSrcPlanes& s, XavcOutFmt fmt, const XavcDstPla
     for (int i = 0; i < helpers; i++) SubmitThreadpoolWork(m_work);
     DoBands();                                           // the calling thread works too
     if (helpers > 0) WaitForThreadpoolWorkCallbacks(m_work, FALSE);
+    return true;
 }

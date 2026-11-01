@@ -10,8 +10,8 @@ mfplat.dll SHA-256 `149a947b…2fcfe1`，i5-8265U + UHD 620 + Radeon 520。
 
 | 目标 | 结论 |
 |------|------|
-| 新版媒体播放器播放 XAVC S / S-I（H.264 High 4:2:2 10bit） | **可行，已验证**（诊断解码器的输出画面出现在播放器窗口中） |
-| 资源管理器缩略图 / 封面 | **可行，已验证**（缩略图代理进程 dllhost 走同一条管线） |
+| 新版媒体播放器播放 XAVC S / S-I（H.264 High 4:2:2 10bit） | **已实现并验证**（libavcodec 解码，画面与 FFmpeg 逐帧一致） |
+| 资源管理器缩略图 / 封面 | **已实现并验证**（缩略图代理进程 dllhost 走同一条管线） |
 | 其他 MF 应用（IMFSourceReader 等） | **可行，已验证** |
 | 普通 MP4（4:2:0 8bit 等） | 不受影响（我们的组件透传，仍由系统解码器解码） |
 | 需要微软批准 / 改受保护的系统键 | **不需要** |
@@ -54,7 +54,7 @@ mfplat.dll SHA-256 `149a947b…2fcfe1`，i5-8265U + UHD 620 + Radeon 520。
 
 另：`HKCU\…\MediaSources\UserPreferred` 虽在 mfplat 路径表中，实测未被使用。
 
-### 真机验证（`tools/experiments/bsh-probe.ps1` 安装的诊断版，解码器输出纯洋红帧）
+### 路径验证（最初用输出纯洋红帧的诊断版解码器，`tools/experiments/bsh-probe.ps1` 安装）
 
 - **新版媒体播放器**（`ActivateForFile`，相当于双击）：日志显示处理器把流改名为 `XAVC`，
   我们的解码器 `SetInputType` / `SetOutputType(NV12)` 被接受并输出帧，**播放器窗口显示洋红画面**；
@@ -63,20 +63,70 @@ mfplat.dll SHA-256 `149a947b…2fcfe1`，i5-8265U + UHD 620 + Radeon 520。
 - **资源管理器缩略图**：dllhost 代理进程经同一路径生成 256×144 缩略图（100% 洋红）。
 - **IMFSourceReader**：系统内存 / D3D11 / RGB32 视频处理三种模式均选中我们的解码器。
 
-## 4. 解码核心与性能
+## 4. 解码器实现（`src/xavc_decoder.cpp`）
 
-libavcodec（FFmpeg，LGPL 动态链接）正确识别 *High 4:2:2 Intra*（S-I）与 *High 4:2:2*（S），
-输出 `yuv422p10le`，画面正确。i5-8265U 纯软解：S-I 4K24 约 40 fps（可实时），
-S 4K60 Long GOP 约 31 fps（达不到实时，属 CPU 上限）。
+- **输入**：MPEG-4 源交给解码器的样本为 Annex-B（4 字节起始码，关键帧内带 SPS/PPS，每帧 8 个 slice），
+  样本时间 = 显示时间（解码顺序送入，B 帧乱序）；`MF_MT_MPEG_SEQUENCE_HEADER` 也是 Annex-B。
+  直接交给 libavcodec（帧级多线程），由它完成 B 帧重排。
+- **输出格式**：在第一帧之前由 SPS 推出（色度格式、位深、裁剪后尺寸、VUI 色彩信息）。4:2:2 10bit 依次提供
+  **Y210 → P010 → YUY2 → NV12**，渲染器取它的视频处理器支持的第一个。实测本机 Intel UHD 620 的
+  D3D11 视频处理器不支持 Y210（支持 P010、YUY2），媒体播放器因此选 P010；支持 Y210 的显卡上保持完整 4:2:2。
+- **DRAIN / FLUSH** 对应 avcodec 的 drain（之后 flush 以便继续接收输入）与 flush（拖动）。
+- **FFmpeg 加载**：解码器第一次需要时，从本 DLL 所在目录 `LoadLibraryEx` 加载 avutil/avcodec（宿主进程
+  不会搜索我们的目录）；字节流处理器完全不碰 FFmpeg。DLL 不依赖任何 MinGW 运行库（构建时检查）。
+- **精简 FFmpeg**（`build/ffmpeg-minimal.sh`，WSL 交叉编译）：只含 H.264 解码器（带 x86 汇编）与 NVDEC，
+  无外部库，LGPL 2.1+；DLL 名带 `-xavc` 后缀（`avcodec-xavc-63.dll`），不会与宿主进程自带的 FFmpeg 冲突。
+  avcodec 从 92.7MB 降到 2.0MB，发布包 zip 约 1.2MB；解码结果与完整版 FFmpeg 逐帧一致。
+- **硬件解码**：H.264 4:2:2 只有 NVDEC（NVIDIA Blackwell 及以后）能解。存在 CUDA 设备时通过
+  libavcodec 的 hwaccel 尝试，失败自动回退软件解码，并在本进程内记住结果。（本机无 NVIDIA 显卡，此路径未实测。）
 
-H.264 High 4:2:2 在消费级 GPU 上几乎无硬解（NVIDIA 仅 Blackwell/RTX 50 新增），
-因此以多线程软解为主；硬解探测作为后续优化。
+### 跟不上实时的处理（`IMFQualityAdvise2`）
 
-## 5. 下一步
+逆向 + 实测：媒体引擎（新版媒体播放器）会 QI `IMFQualityAdvise2`，把渲染器的每个 `MEQualityNotify`
+通过 `NotifyQualityEvent` 转发给解码器，**延迟量放在事件值里（VT_I8，100ns）**，自己从不调用
+`SetDropMode` / `SetQualityLevel`，渲染器也不丢晚到的帧——不处理的话画面会越来越落后于声音（实测 4K60
+在 i5-8265U 上 12 秒落后 5.5 秒）。因此解码器自己根据延迟调整：
 
-1. **正式解码器**：在 MFT 中接入 libavcodec（帧/片多线程、B 帧重排、flush/drain/seek、
-   不连续处理），输出 Y210 / P010 / NV12。
-2. **处理器健壮性**：处理器位于该用户所有 MF 应用打开 .mp4 的路径上，必须绝对稳定、透明。
-3. **安装程序**：机器部分（DLL、COM、MFT 注册）+ 每用户部分（上表）；卸载完全还原；
-   安装后清理受影响文件的缩略图缓存。
-4. 兼容性测试：Long GOP 拖动、长文件、音频、HS（HEVC）不受影响、多显示器/HDR 等。
+| 自动级别 | 措施 |
+|---|---|
+| 1 | 非参考帧不做去块滤波 |
+| 2 | 所有帧不做去块滤波 |
+| 3 | 不解码非参考帧（索尼 Long GOP 的 B 帧） |
+| 4 | 不解码任何 B 帧 |
+
+到最高级别仍落后超过 300ms 时，在**输入端**丢弃样本直到下一个关键帧（GOP = 60 帧 = 1 秒），从关键帧
+干净地恢复（不会有引用缺失的花屏）。连续准时一段时间后逐级恢复（失败则加倍等待时间）。
+实测 4K60 Long GOP：约 1 秒内升到级别 4，跳一次关键帧后音画同步，13～16fps 显示（本机 CPU 上限）；
+S-I 4K24 稳定 24fps，不需要降级。
+
+## 5. 测试记录（i5-8265U，Windows 11 26300）
+
+| 测试 | 结果 |
+|---|---|
+| 与纯 FFmpeg 逐帧比对（`avtest hash` vs `mftest decode`，亮度哈希） | S-I、4K60 Long GOP，Y210/P010/YUY2/NV12 全部比特一致 |
+| 拖动后（Long GOP 10.5s） | 从 10.03s 关键帧开始，60 帧全部一致 |
+| 结尾（drain） | 最后一帧（第 636 帧，26.48s）正确输出 |
+| 新版媒体播放器 S-I 4K24 | 实时 24fps，P010 输出，画面正确 |
+| 新版媒体播放器 S 4K60 Long GOP | 自动降级后音画同步，约 14fps |
+| 资源管理器缩略图（`thumbforce`） | 正确画面 |
+| 普通 4:2:0 MP4 | 仍由 msmpeg2vdec 解码 |
+| 卸载机器部分后残留的每用户设置 | 无害：MF 跳过未注册的处理器，普通 MP4 在桌面程序和媒体播放器中照常播放 |
+
+时间戳说明：Windows 的 MP4 解析器不应用编辑列表（edit list），与 FFmpeg 相比有固定一帧的偏移；
+解码器原样输出收到的时间，这是正确行为。
+
+回归测试脚本：`tools/regress.ps1`（四种输出格式、Long GOP、拖动、结尾，逐帧比对）。
+
+## 6. 安装方式
+
+- 机器部分（管理员）：文件装到 `%ProgramFiles%\XavcDecoder`，注册 COM 类与 `XAVC` 子类型的 MFT，
+  「设置 → 应用」卸载项，Active Setup（本机其他用户下次登录时自动执行每用户注册）。
+- 每用户部分（无需管理员）：`regsvr32 /n /i:user xavc_decoder.dll`，由 DLL 自己写入上表的 HKCU 设置并
+  授予 AppContainer 读权限；原有值保存在 `HKCU\Software\XavcDecoder\Saved`，卸载时恢复。
+- 升级时被占用的旧文件改名后于重启时删除；已验证安装、升级（文件被媒体播放器占用时）与卸载后状态干净。
+
+## 7. 已知限制 / 下一步
+
+1. 改名为 `XAVC` 后，只想"原样转封装"H.264 流（不解码）的程序看到的不再是 `H264` 子类型。
+2. 在带 Y210 视频处理器的显卡、NVIDIA RTX 50（NVDEC 4:2:2）上验证（本机均不具备）。
+3. Windows 10 上验证；更多素材（1080p、4:2:0 10bit、XAVC S-I HD、隔行）测试。

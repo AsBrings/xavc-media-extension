@@ -162,6 +162,14 @@ STDAPI DllUnregisterServer() {
     return S_OK;
 }
 
+// regsvr32 /n /i:user xavc_decoder.dll   -> per-user registration (no admin rights needed)
+// regsvr32 /u /n /i:user xavc_decoder.dll -> remove it
+// Any other command line behaves like DllRegisterServer / DllUnregisterServer.
+STDAPI DllInstall(BOOL install, PCWSTR cmd) {
+    if (cmd && !_wcsicmp(cmd, L"user")) return install ? XavcRegisterUser() : XavcUnregisterUser();
+    return install ? DllRegisterServer() : DllUnregisterServer();
+}
+
 STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
     *ppv = NULL;
