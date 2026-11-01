@@ -9,7 +9,7 @@ XAVC HS（HEVC）由微软的 HEVC 扩展负责，本插件不涉及。
 -----------
 安装：运行 XavcDecoder-<版本>-setup.exe，按向导操作（会请求一次管理员权限）。
       如果正在运行「媒体播放器」，装完后把它关掉再打开。
-卸载：设置 → 应用 → 已安装的应用 → XAVC S / S-I Decoder。
+卸载：设置 → 应用 → 安装的应用（Windows 10 为「应用和功能」）→ XAVC S / S-I Decoder。
 
 （开发者也可以用源码仓库 installer\ 目录里的 install.cmd / uninstall.cmd 脚本安装。）
 
@@ -43,7 +43,7 @@ Lets the Windows "Media Player" app, Explorer thumbnails and other Media Foundat
 play Sony XAVC S and XAVC S-I videos (H.264 High 4:2:2 / High 10 in .MP4).
 
 Install: run XavcDecoder-<version>-setup.exe and follow the wizard; restart Media Player if it is open.
-Uninstall: Settings > Apps > Installed apps > XAVC S / S-I Decoder.
+Uninstall: Settings > Apps > Installed apps (Windows 10: Apps & features) > XAVC S / S-I Decoder.
 
 Only H.264 streams the built-in decoder cannot handle (4:2:2, 10-bit, 4:4:4) are taken over; all
 other MP4 files keep using the Windows decoder. Decoding runs on the CPU (multi-threaded); NVIDIA

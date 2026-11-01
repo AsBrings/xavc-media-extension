@@ -7,6 +7,6 @@ After installation, the Windows Media Player app, Explorer thumbnails and other 
 • When the computer cannot decode fast enough (e.g. 4K 60p on a thin laptop), frames are skipped to keep video and audio in sync.
 • Restart Media Player if it is running.
 • Existing thumbnails are not refreshed automatically; you can clear the thumbnail cache on the last page of this wizard.
-• Uninstall: Settings > Apps > Installed apps > XAVC S / S-I Decoder.
+• Uninstall: Settings > Apps > Installed apps (Windows 10: Apps & features) > XAVC S / S-I Decoder.
 
 Requires 64-bit (x64) Windows 10 or 11.

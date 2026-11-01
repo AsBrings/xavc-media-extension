@@ -156,7 +156,7 @@ function Install-Machine {
     $u = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($UninstKey)
     $u.SetValue('DisplayName', 'XAVC S / S-I Decoder (Media Foundation)')
     $u.SetValue('DisplayVersion', $Version)
-    $u.SetValue('Publisher', 'xavc-media-extension')
+    $u.SetValue('Publisher', '听秋念 (AsBrings)')
     $u.SetValue('InstallLocation', $DestDir)
     $u.SetValue('UninstallString', "`"$PowerShell`" -NoProfile -ExecutionPolicy Bypass -File `"$DestDir\Uninstall-XavcDecoder.ps1`"")
     $u.SetValue('NoModify', 1, [Microsoft.Win32.RegistryValueKind]::DWord)

@@ -25,7 +25,9 @@ AppId={{7F9A3C2E-5E44-4B0A-9C1D-2A6B8E3D4F10}
 AppName=XAVC S / S-I Decoder
 AppVersion={#AppVersion}
 AppVerName=XAVC S / S-I Decoder {#AppVersion}
-AppPublisher=xavc-media-extension
+; Settings > Apps shows the publisher under the app's name (per language, see [CustomMessages])
+AppPublisher={cm:Publisher}
+AppCopyright=Copyright © 2026 听秋念 (AsBrings)
 AppPublisherURL=https://github.com/AsBrings/xavc-media-extension
 AppSupportURL=https://github.com/AsBrings/xavc-media-extension/issues
 AppUpdatesURL=https://github.com/AsBrings/xavc-media-extension/releases
@@ -52,13 +54,15 @@ SolidCompression=yes
 VersionInfoVersion={#AppVersion}.0
 VersionInfoProductName=XAVC S / S-I Decoder
 VersionInfoDescription=XAVC S / S-I Decoder Setup
-VersionInfoCompany=xavc-media-extension
+VersionInfoCompany=听秋念 (AsBrings)
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "inno\ChineseSimplified.isl"; InfoBeforeFile: "inno\info-zh.txt"
 Name: "english"; MessagesFile: "compiler:Default.isl"; InfoBeforeFile: "inno\info-en.txt"
 
 [CustomMessages]
+chinesesimplified.Publisher=听秋念 (AsBrings)
+english.Publisher=AsBrings
 chinesesimplified.AllUsers=同时为本机其他用户启用（他们下次登录时自动生效）
 english.AllUsers=Also enable it for the other users of this PC (at their next sign-in)
 chinesesimplified.EnableForUser=正在为当前用户启用...
@@ -67,6 +71,13 @@ chinesesimplified.ResetThumbnails=清空缩略图缓存，让已有的 XAVC 视�
 english.ResetThumbnails=Clear the thumbnail cache so existing XAVC videos get new thumbnails (restarts Explorer)
 chinesesimplified.OpenReadme=查看说明
 english.OpenReadme=Show the readme
+
+[Messages]
+; the author: bottom left of every wizard page, and on the welcome page
+chinesesimplified.BeveledLabel=听秋念 (AsBrings)
+english.BeveledLabel=AsBrings
+chinesesimplified.WelcomeLabel2=现在将安装 [name/ver] 到您的电脑中。%n%n作者：听秋念（AsBrings）%n%n建议您在继续安装前关闭所有其他应用程序。
+english.WelcomeLabel2=This will install [name/ver] on your computer.%n%nAuthor: AsBrings%n%nIt is recommended that you close all other applications before continuing.
 
 [Tasks]
 Name: "allusers"; Description: "{cm:AllUsers}"

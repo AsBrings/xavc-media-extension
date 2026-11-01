@@ -31,7 +31,7 @@ Windows 把 H.264 写死交给自带解码器，而它不支持 4:2:2 / 10bit。
 运行后按向导操作（会请求一次管理员权限）。安装程序没有代码签名，Windows SmartScreen 可能提示
 "Windows 已保护你的电脑"，点「更多信息 → 仍要运行」即可。
 
-卸载：设置 → 应用 → 已安装的应用 → XAVC S / S-I Decoder。
+卸载：设置 → 应用 → 安装的应用（Windows 10 为「应用和功能」）→ XAVC S / S-I Decoder。
 
 开发者也可以用 `installer/install.cmd` / `uninstall.cmd` 脚本安装（见 [`installer/README.txt`](installer/README.txt)）。
 
